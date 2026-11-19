@@ -1,0 +1,11 @@
+# Customer data and credentials never go to git
+data/
+.env
+*.p8
+*.pem
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

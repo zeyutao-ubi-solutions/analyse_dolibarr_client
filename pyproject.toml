@@ -1,0 +1,31 @@
+[project]
+name = "analyse-dolibarr-client"
+version = "0.1.0"
+description = "Customer profiling from Dolibarr orders (via Snowflake marts) for company scoring"
+requires-python = ">=3.11"
+dependencies = [
+    "snowflake-connector-python[pandas]>=3.12.0",
+    "cryptography>=42.0.0",
+    "pyarrow>=17.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+pull-snowflake = "analyse_dolibarr_client.pull:main"
+build-companies = "analyse_dolibarr_client.companies:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/analyse_dolibarr_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

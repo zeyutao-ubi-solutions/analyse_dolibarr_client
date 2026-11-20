@@ -77,7 +77,8 @@ def render_readme(snap: Snapshot, r: BuildResult, snapshot_date: date) -> str:
         f"生成时间 {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC，由 "
         f"`uv run python -m analyse_dolibarr_client.companies --snapshot {snap.snapshot}` 生成，"
         "本文件每次重跑会被覆盖。读 `data/raw/` 下的 parquet，以及 `erp_socid.py` 只读调用 Dolibarr API 得到的 "
-        "`erp_order_socid.csv`（订单 → 第三方）和 `erp_thirdparties.py` 只读拉取的 `erp_thirdparties.csv`（第三方网站 / 邮箱域名）；"
+        "`erp_order_socid.csv`（订单 → 第三方）、`erp_thirdparties.py` 只读拉取的 `erp_thirdparties.csv`（第三方网站 / 邮箱域名）"
+        "和 `product_lines.py` 只读拉取的 `erp_product_tags.csv`（产品标签）；"
         "未连 Snowflake、未抓 LinkedIn。\n"
     )
 
@@ -589,6 +590,7 @@ def render_readme(snap: Snapshot, r: BuildResult, snapshot_date: date) -> str:
         "（`same_normalized_name` = core key 相同；`same_company_reg_id` = 匹配到的档案注册号相同；`same_third_party_id` = 主 third_party_id 相同），"
         "但 CUSTOMER_ID 不同。名单里没有合并它们。\n"
         "- `erp_orders.csv` / `erp_order_socid.csv`：从 Dolibarr API 只读拉取的订单抬头（id、ref、socid、entity），以及和快照订单的逐张对照。\n"
+        "- `erp_product_tags.csv`：Dolibarr 产品标签（只读拉取），用于区分产品线；`UBI Solutions > GPSBLE` 下的产品是定位，`Portique RFID` / `Kit RFID TC21` / `Terminaux RFID` 是 RFID。\n"
         "- `erp_thirdparties.csv`：每个快照第三方对应的 ERP 公司层面字段（网站、网站域名、邮箱域名、联系人邮箱域名及次数、LinkedIn、员工数档位；不含任何完整邮箱或人名），`tp_name_matches` 为 true 才被采用。\n"
         f"- `issues.csv`：{len(r.issues)} 条，类型分布："
         + "，".join(f"{k} {v}" for k, v in r.issues["issue_type"].value_counts().items())
@@ -597,9 +599,9 @@ def render_readme(snap: Snapshot, r: BuildResult, snapshot_date: date) -> str:
         "- `orders_by_entity.csv`：ENTITY_NAME，列出客户数、订单数、行数、金额和金额占比。\n"
         "- `category_cooccurrence.csv`：品类对的共现客户数和条件占比；对角线是单品类。\n\n"
         "主要字段说明：`recency_days` 是相对快照日 "
-        f"{snapshot_date.isoformat()} 的天数；`n_years_active` 是有下单的不同年份数；`match_status=erp_socid` 时 `third_party_id` 是 ERP 订单上的第三方（多个时取金额最大的非内部公司），`erp_third_parties` 列出全部 socid 和金额，`erp_orders_verified` 是 ID 和订单号都和 ERP 一致的订单数，`name_match_status` / `name_match_third_party_id` / `name_vs_erp` 是单纯名称匹配的结果及其和 ERP 的对照；`history_truncated` 表示客户只在 Page Up / Ubi Smart / Ubi Impact 下过单，这几个法人 2024 年以前的数据没进数据仓库，所以首单日期和活跃年数可能偏短；`share_recurring` 是 IS_RECURRING_REVENUE 金额 / amount_ht_eur；"
+        f"{snapshot_date.isoformat()} 的天数；`n_years_active` 是有下单的不同年份数；`amount_first_24m_ht_eur` 是首单后 24 个月内的金额（新老客户可比），`months_since_first_order` 不足 24 时该值还不完整；`match_status=erp_socid` 时 `third_party_id` 是 ERP 订单上的第三方（多个时取金额最大的非内部公司），`erp_third_parties` 列出全部 socid 和金额，`erp_orders_verified` 是 ID 和订单号都和 ERP 一致的订单数，`name_match_status` / `name_match_third_party_id` / `name_vs_erp` 是单纯名称匹配的结果及其和 ERP 的对照；`history_truncated` 表示客户只在 Page Up / Ubi Smart / Ubi Impact 下过单，这几个法人 2024 年以前的数据没进数据仓库，所以首单日期和活跃年数可能偏短；`share_recurring` 是 IS_RECURRING_REVENUE 金额 / amount_ht_eur；"
         "`top_product_refs` 是金额前 5 的 PRODUCT_REF，格式 `ref:amount;…`（`(sans ref)` 表示没有 PRODUCT_REF 的行）；"
         "`category_mix` 是前 3 品类及占比；`naf_section`/`naf_classe` 只取订单上已有的值（发票、合同表没有能补充的），"
-        f"有值的客户 {int(c['naf_section'].notna().sum())} 个，空的不填；`web_domain` 等网站字段见第 2 节「网站域名」。\n"
+        f"有值的客户 {int(c['naf_section'].notna().sum())} 个，空的不填；`web_domain` 等网站字段见第 2 节「网站域名」；`product_lines` 是买过的业务线（`geoloc` = géolocalisation / Connected Things：BLE / GPS / LoRa 追踪器、信标、网关及其租赁，Connected Things 是定位的软件平台；`rfid` = traçabilité；`ubi_cloud` = Ubi Cloud 订阅 / 许可），按产品判断：有 Dolibarr 产品标签时以标签为准，否则按产品名称、子品类和制造商规则（ITEM_CATEGORY 分不开两者，`Traceurs et objets connectés` 里大部分是 RFID 纺织标签）；带蓝牙 / GPS 的手持终端、扫码枪不算定位；`amount_geoloc_ht_eur` / `amount_rfid_ht_eur` / `amount_ubi_cloud_ht_eur` 是各条线的金额，`geoloc_source` 说明定位判断来自 `tag` 还是 `name_rule`。\n"
     )
     return "\n".join(out)

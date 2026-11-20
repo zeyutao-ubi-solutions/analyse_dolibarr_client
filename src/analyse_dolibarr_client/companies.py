@@ -31,6 +31,7 @@ from analyse_dolibarr_client.names import (
     name_notes,
     names_unrelated,
 )
+from analyse_dolibarr_client.product_lines import TAGS_NAME, add_product_lines, customer_product_lines
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SNAPSHOT = "2026-11-18"
@@ -45,6 +46,9 @@ ENTITY_ID_TO_NAME = {"1": "Ubi Solutions", "2": "Page Up", "3": "Ubi Smart", "5"
 # these entities may have older history that was never loaded, so its first_order_date,
 # n_years_active and "new customer" status are not reliable.
 LATE_HISTORY_ENTITIES = frozenset({"Page Up", "Ubi Smart", "Ubi Impact"})
+
+# Window for amount_first_24m_ht_eur.
+FIRST_SPEND_MONTHS = 24
 
 HARDWARE_CATEGORIES = frozenset(
     {
@@ -140,10 +144,17 @@ class Snapshot:
     erp_order_socid: pd.DataFrame | None = None
     # Per third party: website / email domain / LinkedIn from erp_thirdparties.py; optional.
     erp_thirdparties: pd.DataFrame | None = None
+    # Product catalog (names) and Dolibarr product tags (product_lines.py); optional.
+    product_catalog: pd.DataFrame | None = None
+    product_tags: pd.DataFrame | None = None
 
 
 def load_snapshot(
-    raw_dir: Path, snapshot: str, erp_socid_path: Path | None = None, erp_tp_path: Path | None = None
+    raw_dir: Path,
+    snapshot: str,
+    erp_socid_path: Path | None = None,
+    erp_tp_path: Path | None = None,
+    product_tags_path: Path | None = None,
 ) -> Snapshot:
     d = raw_dir / snapshot
     erp = None
@@ -168,6 +179,12 @@ def load_snapshot(
         contracts=contracts[_is_true(contracts["IS_VALID_CONTRACT"])].copy(),
         erp_order_socid=erp,
         erp_thirdparties=web,
+        product_catalog=pd.read_parquet(d / "mart_product_catalog.parquet")
+        if (d / "mart_product_catalog.parquet").exists()
+        else None,
+        product_tags=pd.read_csv(product_tags_path, dtype=str)
+        if product_tags_path is not None and product_tags_path.exists()
+        else None,
     )
 
 
@@ -345,6 +362,14 @@ def order_metrics(lines: pd.DataFrame, snapshot_date: date) -> pd.DataFrame:
     )
     snap = pd.Timestamp(snapshot_date)
     m["recency_days"] = (snap - pd.to_datetime(m["last_order_date"])).dt.days.astype("Int64")
+    # Spend in the first 24 months after the first order: comparable between old and new
+    # customers (lifetime totals favour old ones). Only meaningful when months_since_first_order >= 24.
+    odate = pd.to_datetime(lines["ORDER_DATE"])
+    first = odate.groupby(lines["CUSTOMER_ID"]).transform("min")
+    in_window = odate < first + pd.DateOffset(months=FIRST_SPEND_MONTHS)
+    m["amount_first_24m_ht_eur"] = lines["amount_real"].where(in_window, 0.0).groupby(lines["CUSTOMER_ID"]).sum()
+    first_ts = pd.to_datetime(m["first_order_date"])
+    m["months_since_first_order"] = ((snap.year - first_ts.dt.year) * 12 + (snap.month - first_ts.dt.month)).astype("Int64")
     m["share_recurring"] = m["amount_recurring_ht_eur"] / m["amount_ht_eur"].where(m["amount_ht_eur"] != 0)
 
     real = lines[lines["is_real"]]
@@ -389,7 +414,14 @@ def order_metrics(lines: pd.DataFrame, snapshot_date: date) -> pd.DataFrame:
                 "buyer_pattern": classify_buyer(int(row["n_orders"]), amount, cat_dict),
             }
         )
-    return m.join(pd.DataFrame(cat_rows).set_index("CUSTOMER_ID"))
+    m = m.join(pd.DataFrame(cat_rows).set_index("CUSTOMER_ID"))
+    if "product_line" in lines.columns:
+        m = m.join(customer_product_lines(lines, "amount_real"))
+        m["amount_geoloc_ht_eur"] = m["amount_geoloc_ht_eur"].fillna(0.0)
+        m["amount_rfid_ht_eur"] = m["amount_rfid_ht_eur"].fillna(0.0)
+        m["amount_ubi_cloud_ht_eur"] = m["amount_ubi_cloud_ht_eur"].fillna(0.0)
+        m["product_lines"] = m["product_lines"].fillna("")
+    return m
 
 
 def invoice_metrics(invoices: pd.DataFrame) -> pd.DataFrame:
@@ -490,11 +522,12 @@ COMPANY_COLUMNS = [
     "name_match_third_party_id", "name_vs_erp", "tp_is_client", "is_also_supplier", "supplier_evidence",
     "is_intercompany", "suspect_integrator", "suspect_integrator_reason",
     "first_order_date", "history_truncated", "last_order_date", "recency_days", "n_years_active", "n_orders",
-    "n_order_lines", "amount_ht_eur", "intercompany_excluded_ht_eur", "amount_recurring_ht_eur", "share_recurring",
+    "n_order_lines", "amount_ht_eur", "amount_first_24m_ht_eur", "months_since_first_order", "intercompany_excluded_ht_eur", "amount_recurring_ht_eur", "share_recurring",
     "n_invoices", "invoice_amount_ht_eur", "order_minus_invoice_ht_eur", "has_contract",
     "n_contracts", "item_categories", "category_mix", "top_item_category",
     "top_item_category_share", "hardware_share", "project_service_share",
-    "license_maintenance_share", "top_product_refs", "buyer_pattern", "naf_section",
+    "license_maintenance_share", "top_product_refs", "buyer_pattern",
+    "product_lines", "amount_geoloc_ht_eur", "amount_rfid_ht_eur", "amount_ubi_cloud_ht_eur", "geoloc_source", "naf_section",
     "naf_classe", "candidate_third_parties", "notes",
 ]
 
@@ -647,6 +680,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
     interco_orders_n = interco_lines.groupby("CUSTOMER_ID")["ORDER_ID"].nunique()
     orders = orders[~drop]
 
+    orders = add_product_lines(orders, snap.product_catalog, snap.product_tags)
     metrics = order_metrics(orders, snapshot_date)
     metrics = metrics.join(invoice_metrics(snap.invoices)).join(contract_metrics(snap.contracts))
 
@@ -1147,9 +1181,11 @@ def main(argv: list[str] | None = None) -> int:
     snapshot_date = date.fromisoformat(args.snapshot)
     erp_path = args.erp_socid or args.out_root / args.snapshot / "erp_order_socid.csv"
     web_path = args.erp_thirdparties or args.out_root / args.snapshot / "erp_thirdparties.csv"
-    snap = load_snapshot(args.raw_root, args.snapshot, erp_path, web_path)
+    tags_path = args.out_root / args.snapshot / TAGS_NAME
+    snap = load_snapshot(args.raw_root, args.snapshot, erp_path, web_path, tags_path)
     print(f"ERP socids: {'used ' + str(erp_path) if snap.erp_order_socid is not None else 'not found, name matching only'}")
     print(f"ERP web fields: {'used ' + str(web_path) if snap.erp_thirdparties is not None else 'not found, no web domains'}")
+    print(f"ERP product tags: {'used ' + str(tags_path) if snap.product_tags is not None else 'not found, name rules only'}")
     result = build(snap, snapshot_date)
     out_dir = args.out_root / args.snapshot
     write_outputs(result, out_dir, render_readme(snap, result, snapshot_date))

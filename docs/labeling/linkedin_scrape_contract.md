@@ -66,15 +66,43 @@ uv run python -m analyse_dolibarr_client.scrape_list --snapshot <snapshot>
 
 不要交回：员工名单、联系人、电话、邮箱、帖子。
 
-## 3. 匹配规则
+## 3. 匹配规则（2026-11-20 试点后收紧）
 
-1. 有 `web_domain` 时，优先找主页「网站」字段的域名（去掉 `www.`）等于 `web_domain` 的主页 → `match_method=domain`，视为已确认。
-2. 否则用 `search_name`（再试 `alt_search_names`）+ `country_code` / `town` 搜索：
-   - 唯一且名称、国家都对得上 → `name_country`；
-   - 多个候选分不清 → `ambiguous`，列出 `candidates`，**不要随便选一个**。
-3. 子公司没有自己的主页、只找到集团主页时：照常交回集团主页，并在 `parent_linkedin_url` 或备注里说明。同一集团的子公司在本仓库里通常已合并为一个 `unit_id`。
+试点 20 个里 13 个「matched」，人工看有 7 个错或存疑（同名外国公司、集团投行页、工会页）。原则：**宁可 not_found / ambiguous，也不要用错的主页凑数**——错配会直接污染标签，漏掉只是少一个样本。
 
-非 `domain` 匹配的结果，本仓库会抽样人工核对（L1 实体对齐）；错配率高的话再调整规则。
+### 3.1 搜什么（按顺序，直到有一条通过 3.2）
+
+1. 有 `web_domain` 时，先用域名主体当品牌名搜（`aroihoteles.com` → `aroihoteles`，`360hostel.com` → `360hostel`）：法定名常搜空，品牌名更接近 LinkedIn 上的名字。
+2. `search_name`，再依次 `alt_search_names`。
+3. actor 若支持一次返回多个候选（如 `maxItems` / limit），取前 3–5 个，按 3.2 逐个判断；只返回第一条时就只判断第一条。
+
+### 3.2 什么算 matched
+
+| 情况 | 结果 |
+|---|---|
+| 主页 website 的主域名（eTLD+1，去掉 `www.` 和子域名，如 `fr.scc.com` → `scc.com`）= `web_domain` 的主域名 | `matched`，`match_method=domain` |
+| 有 `web_domain`，主页 website 是**另一个**域名 | **不算 matched**。名称和国家都对得上时 → `ambiguous`（进人工队列），否则 → 看下一个候选 / `not_found` |
+| 主页没有 website | 只有「规范化名称完全相同 + HQ 国家 = `country_code`」（有 `town` 时城市也要一致）才 `matched`，`match_method=name_country`；否则 `ambiguous` |
+| 没有 `web_domain` | 同上：规范化名称完全相同 + HQ 国家一致 → `name_country`；名称只是部分相同 → `ambiguous` |
+| `country_code` 为空 | **永不自动 matched**，最多 `ambiguous`（`name_only` 不再算 matched） |
+| HQ 国家 ≠ `country_code` | 不算 matched；名称完全相同时 `ambiguous`，否则 `not_found` |
+| 不是公司本身的页面：工会（SYNDICAT、CGT、CFDT、FO）、CSE / 员工委员会、校友 / 校园、粉丝页 | 拒绝，看下一个候选 / `not_found` |
+
+「规范化名称」：去重音、大小写、标点和法律形式后比较（可用本仓库 `analyse_dolibarr_client.names.core_key`）。
+
+### 3.3 额外标记（不影响 matched，但要交回）
+
+| 列 | 含义 |
+|---|---|
+| `group_page` | 域名对上了，但主页名称和清单名称没有共同词（如子公司的域名指向集团页）。可用 `names.names_unrelated` 判断 |
+| `thin_page` | 员工数 ≤ 1 且没有 website，或 description 少于 20 个词 |
+| `query_used` | 实际命中的搜索词（来自 `originalQuery.search`） |
+
+### 3.4 人工队列
+
+所有 `ambiguous` 写入 `linkedin_review_queue.csv`：`unit_id`、清单里的名称 / 域名 / 国家 / 城市、每个候选的 URL / 名称 / website / HQ 国家 / 城市。人工确认后才能进训练；未确认的不用。
+
+匹配规则对所有单元一视同仁，不能因为是不是客户而不同（清单里本来也没有这个信息）。全量跑完后，本仓库会按客户 / 潜在客户分别统计匹配率，检查有没有系统性差异。
 
 ## 4. 本仓库收到后做什么
 

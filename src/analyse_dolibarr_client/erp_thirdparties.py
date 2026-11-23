@@ -36,6 +36,8 @@ FREE_MAIL_DOMAINS = {
     "163.com", "126.com", "qq.com", "mail.ru", "yandex.ru", "seznam.cz", "bluewin.ch",
     "hotmail.es", "hotmail.co.uk", "yahoo.co.uk", "outlook.es", "live.co.uk", "btinternet.com",
     "virgilio.it", "tiscali.it", "sky.com", "aliceadsl.fr", "numericable.fr",
+    "inwind.it", "alice.it", "tin.it", "email.it", "fastwebnet.it", "hotmail.it", "yahoo.it",
+    "live.it", "outlook.it",
     "gnet.tn", "planet.tn", "topnet.tn",  # Tunisian ISP mailboxes
 }
 # E-invoicing / document platforms: an address there is the customer's AP inbox, not its domain.

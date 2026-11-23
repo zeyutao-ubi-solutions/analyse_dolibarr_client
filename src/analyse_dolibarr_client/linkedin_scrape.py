@@ -23,6 +23,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from analyse_dolibarr_client.companies import DEFAULT_SNAPSHOT, PROJECT_ROOT
+from analyse_dolibarr_client.erp_thirdparties import FREE_MAIL_DOMAINS
 from analyse_dolibarr_client.names import basic_key, core_key, country_iso, names_unrelated
 from analyse_dolibarr_client.scrape_list import LIST_NAME
 
@@ -51,6 +52,9 @@ _MULTI_SUFFIX = frozenset({
     "com.au", "net.au", "org.au", "co.jp", "co.nz", "co.za", "co.in", "co.kr",
     "com.br", "com.mx", "com.ar", "com.tr", "com.cn", "com.tw", "com.hk",
     "co.id", "com.sg", "com.my",
+    # Government namespaces: each ministry / agency under them is its own organisation.
+    "gouv.fr", "gob.es", "gov.it", "gov.pl", "gov.pt", "gov.br", "gov.tr", "gob.mx",
+    "gc.ca", "gv.at", "admin.ch", "gov.au", "gov.in",
 })
 _REJECT_NAME = re.compile(
     r"\b(SYNDICAT|CGT|CFDT|CSE|ALUMNI|CAMPUS|FANPAGE|FAN[ -]?PAGE|"
@@ -100,7 +104,7 @@ def redact(text: object, token: str) -> str:
 
 
 def load_apify_token(env_file: Path | None = None) -> str:
-    load_dotenv(env_file or DEFAULT_APIFY_ENV, override=False)
+    load_dotenv(env_file or DEFAULT_APIFY_ENV, override=True)
     token = os.environ.get("APIFY_TOKEN", "").strip()
     if not token:
         raise ValueError("APIFY_TOKEN missing in environment or env file")
@@ -145,8 +149,14 @@ def registrable_domain(value: object) -> str | None:
     return last2
 
 
-def domain_brand(web_domain: object) -> str | None:
+def company_domain(web_domain: object) -> str | None:
+    """Registrable domain usable as company evidence; mailbox providers (inwind.it…) say nothing."""
     host = registrable_domain(web_domain)
+    return None if host in FREE_MAIL_DOMAINS else host
+
+
+def domain_brand(web_domain: object) -> str | None:
+    host = company_domain(web_domain)
     if not host:
         return None
     return host.split(".")[0] or None
@@ -409,7 +419,7 @@ def _ambiguous(items: list[dict[str, Any]], method: str | None = None) -> MatchD
 def classify(unit: dict[str, Any], items: list[dict[str, Any]], *, has_remaining: bool) -> MatchDecision:
     """Decide match_status for one unit from collected actor items. Never reads labels."""
     pool = [i for i in unique_by_url(items) if not is_rejected_page(i)]
-    unit_domain = registrable_domain(unit.get("web_domain"))
+    unit_domain = company_domain(unit.get("web_domain"))
     unit_country = as_country_iso(unit.get("country_code"))
     town = unit.get("town") if isinstance(unit.get("town"), str) and unit["town"].strip() else None
 
@@ -617,12 +627,13 @@ def review_rows_for(unit: dict[str, Any], decision: MatchDecision) -> list[dict[
     return rows
 
 
-def write_review_queue(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_review_queue(path: Path, rows: list[dict[str, Any]], resolved_ids: set[str] | frozenset[str] = frozenset()) -> None:
+    """Upsert candidate rows; drop stale rows of every unit re-decided this run (``resolved_ids``)."""
     new = pd.DataFrame(rows, columns=REVIEW_COLUMNS) if rows else pd.DataFrame(columns=REVIEW_COLUMNS)
     if path.exists() and path.stat().st_size:
         old = pd.read_csv(path, dtype={"unit_id": str}, encoding="utf-8-sig")
-        if not new.empty:
-            old = old[~old["unit_id"].astype(str).isin(new["unit_id"].astype(str))]
+        drop = set(resolved_ids) | set(new["unit_id"].astype(str))
+        old = old[~old["unit_id"].astype(str).isin(drop)]
         out = pd.concat([old, new], ignore_index=True) if not new.empty else old
     else:
         out = new
@@ -727,6 +738,8 @@ def run_actor(
         except Exception as exc:  # noqa: BLE001 — retry then record
             last_err = ApifyRunError(redact(exc, token))
             log.warning("actor attempt %s/%s failed: %s", attempt + 1, retries + 1, last_err)
+            if _quota_error(str(last_err)):
+                raise last_err
             if attempt < retries:
                 time.sleep(min(5 * (attempt + 1), 20))
     raise last_err or ApifyRunError("actor failed")
@@ -771,16 +784,23 @@ def load_progress(path: Path, unit_ids: list[str]) -> dict[str, dict[str, Any]]:
         for rec in existing.to_dict(orient="records"):
             uid = str(rec.get("unit_id") or "")
             if uid in rows:
-                rec["attempts"] = int(float(rec["attempts"])) if rec.get("attempts") not in (None, "") else 0
+                rec["attempts"] = _as_int(rec.get("attempts"))
                 if rec.get("status") == "in_progress":
                     rec["status"] = "pending"
                 rows[uid].update({k: rec.get(k, rows[uid][k]) for k in PROGRESS_COLUMNS})
-                rows[uid]["attempts"] = int(rec.get("attempts") or 0)
+                rows[uid]["attempts"] = _as_int(rec.get("attempts"))
     return rows
 
 
 def save_progress(path: Path, rows: dict[str, dict[str, Any]]) -> None:
-    df = pd.DataFrame([rows[k] for k in rows], columns=PROGRESS_COLUMNS)
+    existing: dict[str, dict[str, Any]] = {}
+    if path.exists() and path.stat().st_size:
+        for rec in pd.read_csv(path, dtype=str, encoding="utf-8-sig").to_dict(orient="records"):
+            uid = str(rec.get("unit_id") or "")
+            if uid:
+                existing[uid] = rec
+    existing.update(rows)
+    df = pd.DataFrame([existing[k] for k in existing], columns=PROGRESS_COLUMNS)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
@@ -794,7 +814,10 @@ def load_partial(path: Path) -> dict[str, list[dict[str, Any]]]:
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             uid, item = rec.get("unit_id"), rec.get("item")
             if isinstance(uid, str) and isinstance(item, dict):
                 out.setdefault(uid, []).append(item)
@@ -839,6 +862,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if number != number:
+        return default
+    return int(number)
+
+
 def _is_done(row: dict[str, Any], *, refetch: bool) -> bool:
     if refetch:
         return False
@@ -847,7 +882,11 @@ def _is_done(row: dict[str, Any], *, refetch: bool) -> bool:
 
 def _quota_error(err: str) -> bool:
     low = err.lower()
-    return any(s in low for s in ("rate limit", "ratelimit", "quota", "limit exceeded", "429", "out of credit", "payment required"))
+    return any(s in low for s in (
+        "rate limit", "ratelimit", "quota", "limit exceeded", "429",
+        "out of credit", "payment required", "monthly usage", "free plan",
+        "usage cycle", "upgrade at",
+    ))
 
 
 def merge_raw_into_partial(
@@ -866,7 +905,10 @@ def merge_raw_into_partial(
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            item = json.loads(line)
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if not isinstance(item, dict):
                 continue
             oq = original_query(item)
@@ -940,6 +982,7 @@ def scrape(
     }
     result_rows: dict[str, dict[str, Any]] = {}
     review_acc: list[dict[str, Any]] = []
+    decided_ids: set[str] = set()
 
     def pending_ids() -> list[str]:
         return [uid for uid in unit_ids if not _is_done(progress[uid], refetch=False)]
@@ -948,8 +991,8 @@ def scrape(
         save_progress(out_dir / "progress.csv", progress)
         if result_rows:
             upsert_results(results_path, list(result_rows.values()))
-        if review_acc:
-            write_review_queue(review_path, review_acc)
+        if review_acc or decided_ids:
+            write_review_queue(review_path, review_acc, decided_ids)
 
     def maybe_pause(reason: str) -> None:
         if not check_stops:
@@ -966,11 +1009,6 @@ def scrape(
             n_err = sum(1 for uid in batch_uids if progress[uid].get("status") == "error")
             if batch_uids and n_err / len(batch_uids) > 0.20:
                 maybe_pause(f"error rate {n_err}/{len(batch_uids)} > 20% in one batch")
-        done = [uid for uid in unit_ids if progress[uid].get("status") in TERMINAL]
-        if len(done) >= 20:
-            n_amb = sum(1 for uid in done if progress[uid].get("status") == "ambiguous")
-            if n_amb / len(done) > 0.40:
-                maybe_pause(f"ambiguous {n_amb}/{len(done)} > 40%")
 
     def finalize(uid: str, decision: MatchDecision, run_id: str | None, search_used: str | None) -> None:
         scraped_at = _now()
@@ -978,6 +1016,7 @@ def scrape(
             decision.query_used = search_used
         row = row_from_decision(uid, decision, scraped_at)
         result_rows[uid] = row
+        decided_ids.add(uid)
         progress[uid].update({
             "status": decision.match_status,
             "match_method": decision.match_method,
@@ -1013,9 +1052,11 @@ def scrape(
     try:
         while True:
             for uid in list(pending_ids()):
-                if next_search(units[uid], tried[uid]) is None:
-                    decision = classify(units[uid], partial.get(uid, []), has_remaining=False)
-                    finalize(uid, decision, None, None)
+                remaining = next_search(units[uid], tried[uid]) is not None
+                decision = classify(units[uid], partial.get(uid, []), has_remaining=remaining)
+                if decision.needs_more:
+                    continue
+                finalize(uid, decision, None, None)
 
             batch: list[tuple[str, str]] = []
             for uid in pending_ids():
@@ -1042,9 +1083,13 @@ def scrape(
                     wait_secs=wait_secs, timeout_secs=timeout_secs, retries=retries, token=token,
                 )
             except ApifyRunError as exc:
-                mark_error([u for u, _ in batch], str(exc))
                 if _quota_error(str(exc)):
+                    for uid, _ in batch:
+                        progress[uid]["status"] = "pending"
+                        progress[uid]["updated_at"] = _now()
+                    persist_outputs()
                     maybe_pause(f"Apify rate limit or quota: {exc}")
+                mark_error([u for u, _ in batch], str(exc))
                 append_run(out_dir / "runs.csv", {
                     "run_id": None, "dataset_id": None,
                     "unit_ids": ";".join(u for u, _ in batch), "status": "error",
@@ -1077,7 +1122,7 @@ def scrape(
                 if not host:
                     continue
                 for uid in still_empty:
-                    if registrable_domain(units[uid].get("web_domain")) == host:
+                    if company_domain(units[uid].get("web_domain")) == host:
                         assigned[uid].append(item)
                         break
 
@@ -1161,6 +1206,143 @@ def summarize(results: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+REVIEW_METHODS = frozenset({"claude_review", "human_review"})
+
+
+def items_by_url(raw_dir: Path) -> dict[str, dict[str, Any]]:
+    """Every actor item seen, keyed by LinkedIn URL; a full page beats a thin search hit."""
+    out: dict[str, dict[str, Any]] = {}
+    for path in sorted(raw_dir.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                continue
+            url = linkedin_url(item) if isinstance(item, dict) else None
+            if url and (url not in out or not needs_detail_fetch(item)):
+                out[url] = item
+    return out
+
+
+def apply_review(
+    decisions_path: Path,
+    out_dir: Path,
+    *,
+    results_path: Path,
+    units_df: pd.DataFrame,
+    review_path: Path | None = None,
+) -> list[str]:
+    """Turn accepted review candidates into ``matched`` rows.
+
+    A row's decision is ``human_decision`` when filled, else ``claude_decision``; ``match_method``
+    records which (``human_review`` / ``claude_review``) so training can filter on it. Only units
+    still ``ambiguous`` with exactly one accepted candidate are changed. Returns their unit_ids."""
+    review_path = review_path or (out_dir.parent / "linkedin_review_queue.csv")
+    dec = pd.read_csv(decisions_path, dtype=str, encoding="utf-8-sig")
+    human = dec.get("human_decision", pd.Series(index=dec.index, dtype=str)).fillna("").str.strip().str.lower()
+    claude = dec.get("claude_decision", pd.Series(index=dec.index, dtype=str)).fillna("").str.strip().str.lower()
+    dec["final"] = human.where(human != "", claude)
+    dec["method"] = ["human_review" if h else "claude_review" for h in human]
+    acc = dec[dec["final"] == "accept"]
+    n_acc = acc.groupby("unit_id").size()
+    acc = acc[acc["unit_id"].isin(n_acc.index[n_acc == 1])]
+
+    res = pd.read_csv(results_path, dtype={"unit_id": str}, encoding="utf-8-sig").set_index("unit_id", drop=False)
+    units = units_from_frame(units_df)
+    by_url = items_by_url(out_dir / "raw")
+    for items in load_partial(out_dir / "partial.jsonl").values():  # older runs kept items only here
+        for item in items:
+            url = linkedin_url(item)
+            if url and (url not in by_url or (needs_detail_fetch(by_url[url]) and not needs_detail_fetch(item))):
+                by_url[url] = item
+    rows: list[dict[str, Any]] = []
+    now = _now()
+    for rec in acc.to_dict(orient="records"):
+        uid, url = rec["unit_id"], rec["candidate_url"]
+        if uid not in res.index or res.at[uid, "match_status"] != "ambiguous" or uid not in units:
+            continue
+        item = by_url.get(url)
+        if item is None:
+            log.warning("apply_review %s: no stored item for %s", uid, url)
+            continue
+        decision = _matched(units[uid], rec["method"], item)
+        decision.group_page = group_page_flag(units[uid], item)
+        rows.append(row_from_decision(uid, decision, now))
+        log.info("apply_review %s -> matched (%s) url=%s", uid, rec["method"], url)
+    if not rows:
+        return []
+    upsert_results(results_path, rows)
+    done = {r["unit_id"] for r in rows}
+    write_review_queue(review_path, [], done)
+    progress_path = out_dir / "progress.csv"
+    if progress_path.exists():
+        prog = pd.read_csv(progress_path, dtype=str, encoding="utf-8-sig")
+        hit = prog["unit_id"].isin(done)
+        prog.loc[hit, "status"] = "matched"
+        prog.loc[hit, "match_method"] = prog.loc[hit, "unit_id"].map({r["unit_id"]: r["match_method"] for r in rows})
+        prog.loc[hit, "updated_at"] = now
+        prog.to_csv(progress_path, index=False, encoding="utf-8-sig")
+    return sorted(done)
+
+
+def reclassify(
+    units_df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    results_path: Path,
+    review_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Re-run ``classify`` on already-scraped items (no Apify call) and rewrite only units whose
+    status or LinkedIn page changed. Returns one ``{unit_id, old_status, new_status, old_url, new_url}``
+    per change."""
+    review_path = review_path or (out_dir.parent / "linkedin_review_queue.csv")
+    res = pd.read_csv(results_path, dtype={"unit_id": str}, encoding="utf-8-sig").set_index("unit_id", drop=False)
+    units = {uid: u for uid, u in units_from_frame(units_df).items() if uid in res.index}
+    partial = load_partial(out_dir / "partial.jsonl")
+    merge_raw_into_partial(out_dir / "raw", units, partial)
+    detail = items_by_url(out_dir / "raw")
+
+    changes: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    review: list[dict[str, Any]] = []
+    now = _now()
+    for uid, unit in units.items():
+        if res.at[uid, "match_method"] in REVIEW_METHODS:
+            continue  # a reviewer's decision is never overridden by the rules
+        decision = classify(unit, partial.get(uid, []), has_remaining=False)
+        new_url = linkedin_url(decision.item) if decision.item else None
+        old_url = res.at[uid, "linkedin_url"] if isinstance(res.at[uid, "linkedin_url"], str) else None
+        old_status = res.at[uid, "match_status"]
+        if decision.match_status == old_status and new_url == old_url:
+            continue
+        if new_url and needs_detail_fetch(decision.item) and new_url in detail:
+            decision.item = detail[new_url]
+        rows.append(row_from_decision(uid, decision, now))
+        review.extend(review_rows_for(unit, decision))
+        changes.append({
+            "unit_id": uid, "old_status": old_status, "new_status": decision.match_status,
+            "old_url": old_url, "new_url": new_url,
+        })
+        log.info("reclassify %s: %s -> %s url=%s", uid, old_status, decision.match_status, new_url)
+
+    # The queue only holds candidates of units still ambiguous: drop leftovers of resolved ones.
+    not_ambiguous = set(res.index[res["match_status"] != "ambiguous"]) | {c["unit_id"] for c in changes}
+    write_review_queue(review_path, review, not_ambiguous)
+    if rows:
+        upsert_results(results_path, rows)
+        progress_path = out_dir / "progress.csv"
+        if progress_path.exists():
+            prog = pd.read_csv(progress_path, dtype=str, encoding="utf-8-sig")
+            by_uid = {r["unit_id"]: r for r in rows}
+            for i, uid in prog["unit_id"].items():
+                if uid in by_uid:
+                    prog.at[i, "status"] = by_uid[uid]["match_status"]
+                    prog.at[i, "match_method"] = by_uid[uid]["match_method"]
+                    prog.at[i, "updated_at"] = now
+            prog.to_csv(progress_path, index=False, encoding="utf-8-sig")
+    return changes
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--snapshot", default=DEFAULT_SNAPSHOT)
@@ -1179,7 +1361,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout-secs", type=int, default=DEFAULT_TIMEOUT_SECS)
     p.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
     p.add_argument("--refetch", action="store_true")
+    p.add_argument("--reclassify", type=Path, default=None, metavar="RESULTS_CSV",
+                   help="re-run matching on stored items (no Apify call) and update this results CSV")
+    p.add_argument("--apply-review", type=Path, default=None, metavar="DECISIONS_CSV",
+                   help="mark accepted review candidates as matched (no Apify call); needs --results")
+    p.add_argument("--results", type=Path, default=None, metavar="RESULTS_CSV")
     a = p.parse_args(argv)
+
+    if a.apply_review is not None:
+        list_path = a.list_path or (a.out_root / a.snapshot / "labeling" / LIST_NAME)
+        lst = pd.read_csv(list_path, dtype={"unit_id": str}, encoding="utf-8-sig")
+        out_dir = a.out_dir or (a.out_root / a.snapshot / "labeling" / "linkedin")
+        if a.results is None:
+            p.error("--apply-review needs --results RESULTS_CSV")
+        setup_log(out_dir / "scrape.log", "")
+        done = apply_review(a.apply_review, out_dir, results_path=a.results, units_df=lst)
+        print(f"matched_from_review={len(done)}")
+        return 0
+
+    if a.reclassify is not None:
+        list_path = a.list_path or (a.out_root / a.snapshot / "labeling" / LIST_NAME)
+        lst = pd.read_csv(list_path, dtype={"unit_id": str}, encoding="utf-8-sig")
+        out_dir = a.out_dir or (a.out_root / a.snapshot / "labeling" / "linkedin")
+        setup_log(out_dir / "scrape.log", "")
+        changes = reclassify(lst, out_dir, results_path=a.reclassify)
+        for c in changes:
+            print(f"{c['unit_id']}: {c['old_status']} -> {c['new_status']} ({c['old_url']} -> {c['new_url']})")
+        print(f"changed={len(changes)}")
+        return 0
 
     if not a.pilot and not a.pilot2 and not a.all and a.limit is None:
         p.error("refusing to scrape the full list; pass --pilot, --pilot2, --limit N, or --all")

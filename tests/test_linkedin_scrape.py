@@ -5,17 +5,22 @@ import pytest
 
 from analyse_dolibarr_client.linkedin_scrape import (
     ACTOR_ID,
+    apply_review,
+    _quota_error,
     classify,
     domain_brand,
     is_rejected_page,
     main,
     normalize_domain,
+    reclassify,
     registrable_domain,
     run_record,
+    save_progress,
     scrape,
     search_sequence,
     select_pilot,
     usage_from_run,
+    write_review_queue,
 )
 
 
@@ -240,6 +245,43 @@ def test_alt_search_recovers_domain(tmp_path, monkeypatch):
     assert client.calls[0].get("searches") == ["acme"]
 
 
+def test_resume_does_not_research_matched_with_unused_alts(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", TOKEN)
+    units = _units({
+        "unit_id": "acme.com", "batch": "main", "search_name": "Acme",
+        "alt_search_names": "Acme SA",
+        "web_domain": "acme.com", "country_code": "FR", "town": None, "has_domain": True,
+    })
+    client = FakeClient(by_search={"Acme": _item()})
+    scrape(units, tmp_path, client=client, retries=0, check_stops=False)
+    n_calls = len(client.calls)
+    assert n_calls >= 1
+    client.by_search = {"Acme SA": _item(name="Acme SA", website="https://other.example")}
+    scrape(units, tmp_path, client=client, retries=0, check_stops=False)
+    assert len(client.calls) == n_calls
+
+
+def test_save_progress_keeps_other_units(tmp_path):
+    path = tmp_path / "progress.csv"
+    save_progress(path, {
+        "a.com": {
+            "unit_id": "a.com", "status": "matched", "attempts": 1, "last_error": None,
+            "match_method": "domain", "search_used": "a", "tried_searches": "a",
+            "run_ids": "r1", "updated_at": "2026-11-20T00:00:00Z",
+        },
+    })
+    save_progress(path, {
+        "b.com": {
+            "unit_id": "b.com", "status": "pending", "attempts": 0, "last_error": None,
+            "match_method": None, "search_used": None, "tried_searches": "",
+            "run_ids": "", "updated_at": "2026-11-23T00:00:00Z",
+        },
+    })
+    out = pd.read_csv(path, dtype=str)
+    assert set(out["unit_id"]) == {"a.com", "b.com"}
+    assert list(out.loc[out["unit_id"] == "a.com", "status"]) == ["matched"]
+
+
 def test_resume_skips_completed(tmp_path, monkeypatch):
     monkeypatch.setenv("APIFY_TOKEN", TOKEN)
     units = _units({
@@ -267,6 +309,14 @@ def test_token_never_written(tmp_path, monkeypatch):
         if path.is_file():
             text = path.read_text(encoding="utf-8", errors="replace")
             assert TOKEN not in text, path
+
+
+def test_quota_error_detects_free_plan_monthly_usage():
+    assert _quota_error(
+        "You've used the $5.00 of monthly usage included in the Free plan, "
+        "so Actor runs and other Apify services are blocked"
+    )
+    assert not _quota_error("actor timeout")
 
 
 def test_actor_failure_marks_error(tmp_path, monkeypatch):
@@ -333,3 +383,108 @@ def test_module_does_not_read_labels():
     assert "lookalike_units" not in src
     assert '["label"]' not in src
     assert "lookalike_units.csv" not in src
+
+
+def test_gouv_fr_ministries_are_separate_domains():
+    assert registrable_domain("https://www.interieur.gouv.fr") == "interieur.gouv.fr"
+    assert domain_brand("finances.gouv.fr") == "finances"
+    unit = {"search_name": "Ministere de l'Interieur", "web_domain": "interieur.gouv.fr", "country_code": "FR", "town": None}
+    item = _item(name="Cybermalveillance.gouv.fr", website="https://www.cybermalveillance.gouv.fr")
+    assert classify(unit, [item], has_remaining=False).match_status == "not_found"
+
+
+def test_mailbox_domain_is_not_company_evidence():
+    unit = {"search_name": "Tessuti Zampagna", "web_domain": "inwind.it", "country_code": "IT", "town": None}
+    item = _item(name="Inwind", website="https://www.inwind.it", hq_country="IT")
+    assert classify(unit, [item], has_remaining=False).match_status == "not_found"
+    assert domain_brand("inwind.it") is None
+
+
+def test_review_queue_drops_rows_of_units_now_resolved(tmp_path):
+    q = tmp_path / "q.csv"
+    write_review_queue(q, [{"unit_id": "a.com", "candidate_url": "u1"}, {"unit_id": "b.com", "candidate_url": "u2"}])
+    write_review_queue(q, [], {"a.com"})
+    assert list(pd.read_csv(q, dtype=str)["unit_id"]) == ["b.com"]
+
+
+def test_reclassify_updates_only_changed_units(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", TOKEN)
+    units = _units(
+        {"unit_id": "acme.com", "batch": "main", "search_name": "Acme", "alt_search_names": None,
+         "web_domain": "acme.com", "country_code": "FR", "town": None, "has_domain": True},
+        {"unit_id": "beta.com", "batch": "main", "search_name": "Beta", "alt_search_names": None,
+         "web_domain": "beta.com", "country_code": "FR", "town": None, "has_domain": True},
+    )
+    client = FakeClient(by_search={
+        "Acme": _item(),
+        "Beta": _item(name="Beta", website="https://other.io",
+                      linkedinUrl="https://www.linkedin.com/company/beta", universalName="beta"),
+    })
+    res, q = tmp_path / "res.csv", tmp_path / "q.csv"
+    scrape(units, tmp_path, client=client, retries=0, check_stops=False, results_path=res, review_path=q)
+    assert set(pd.read_csv(q, dtype=str)["unit_id"]) == {"beta.com"}
+    df = pd.read_csv(res, dtype=str)
+    df.loc[df["unit_id"] == "beta.com", ["match_status", "linkedin_url"]] = ["matched", "https://x"]
+    df.to_csv(res, index=False, encoding="utf-8-sig")
+    stamp = df.loc[df["unit_id"] == "acme.com", "scraped_at"].item()
+    n_calls = len(client.calls)
+
+    changes = reclassify(units, tmp_path, results_path=res, review_path=q)
+
+    assert [c["unit_id"] for c in changes] == ["beta.com"]
+    out = pd.read_csv(res, dtype=str).set_index("unit_id")
+    assert out.at["beta.com", "match_status"] == "ambiguous"
+    assert out.at["acme.com", "scraped_at"] == stamp
+    assert len(client.calls) == n_calls
+    prog = pd.read_csv(tmp_path / "progress.csv", dtype=str).set_index("unit_id")
+    assert prog.at["beta.com", "status"] == "ambiguous"
+    assert set(pd.read_csv(q, dtype=str)["unit_id"]) == {"beta.com"}
+
+
+def test_reclassify_prunes_queue_rows_of_resolved_units(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", TOKEN)
+    units = _units({"unit_id": "acme.com", "batch": "main", "search_name": "Acme", "alt_search_names": None,
+                    "web_domain": "acme.com", "country_code": "FR", "town": None, "has_domain": True})
+    res, q = tmp_path / "res.csv", tmp_path / "q.csv"
+    scrape(units, tmp_path, client=FakeClient(by_search={"Acme": _item()}), retries=0,
+           check_stops=False, results_path=res, review_path=q)
+    write_review_queue(q, [{"unit_id": "acme.com", "candidate_url": "stale"}])
+    assert reclassify(units, tmp_path, results_path=res, review_path=q) == []
+    assert pd.read_csv(q, dtype=str).empty
+
+
+def test_apply_review_marks_accept_matched_and_survives_reclassify(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", TOKEN)
+    units = _units({"unit_id": "beta.com", "batch": "main", "search_name": "Beta", "alt_search_names": None,
+                    "web_domain": "beta.com", "country_code": "FR", "town": None, "has_domain": True})
+    url = "https://www.linkedin.com/company/beta"
+    client = FakeClient(by_search={"Beta": _item(name="Beta", website="https://other.io", linkedinUrl=url, universalName="beta")})
+    res, q = tmp_path / "res.csv", tmp_path / "q.csv"
+    scrape(units, tmp_path, client=client, retries=0, check_stops=False, results_path=res, review_path=q)
+    assert pd.read_csv(res, dtype=str).loc[0, "match_status"] == "ambiguous"
+    dec = tmp_path / "dec.csv"
+    pd.DataFrame([{"unit_id": "beta.com", "candidate_url": url, "claude_decision": "accept", "human_decision": None}]).to_csv(dec, index=False)
+
+    assert apply_review(dec, tmp_path, results_path=res, units_df=units, review_path=q) == ["beta.com"]
+
+    row = pd.read_csv(res, dtype=str).iloc[0]
+    assert (row["match_status"], row["match_method"], row["linkedin_url"]) == ("matched", "claude_review", url)
+    assert row["description"] == "We make things."
+    assert pd.read_csv(q, dtype=str).empty
+    assert pd.read_csv(tmp_path / "progress.csv", dtype=str).loc[0, "status"] == "matched"
+    assert reclassify(units, tmp_path, results_path=res, review_path=q) == []
+    assert pd.read_csv(res, dtype=str).loc[0, "match_status"] == "matched"
+
+
+def test_apply_review_human_decision_overrides_claude(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", TOKEN)
+    units = _units({"unit_id": "beta.com", "batch": "main", "search_name": "Beta", "alt_search_names": None,
+                    "web_domain": "beta.com", "country_code": "FR", "town": None, "has_domain": True})
+    url = "https://www.linkedin.com/company/beta"
+    client = FakeClient(by_search={"Beta": _item(name="Beta", website="https://other.io", linkedinUrl=url, universalName="beta")})
+    res = tmp_path / "res.csv"
+    scrape(units, tmp_path, client=client, retries=0, check_stops=False, results_path=res, review_path=tmp_path / "q.csv")
+    dec = tmp_path / "dec.csv"
+    pd.DataFrame([{"unit_id": "beta.com", "candidate_url": url, "claude_decision": "accept", "human_decision": "reject"}]).to_csv(dec, index=False)
+    assert apply_review(dec, tmp_path, results_path=res, units_df=units, review_path=tmp_path / "q.csv") == []
+    assert pd.read_csv(res, dtype=str).loc[0, "match_status"] == "ambiguous"

@@ -1,6 +1,6 @@
 # 公司业务打分（activity scorer）
 
-> 状态（2026-11-25）：第一版已训练，经过两轮审查修订（报告在 `data/processed/2026-11-18/scores/review_2026-11-24/`），模型文件在 `data/models/activity/2026-11-24/`。代码是 `src/analyse_dolibarr_client/activity.py`。
+> 状态（2026-11-25）：第一版已训练，经过两轮审查修订，又按 2026-11-25 的改进分析加入了 LinkedIn 行业、把 other 拆成 5 个子标签、把门槛调到 0.65（报告都在 `data/processed/2026-11-18/scores/review_2026-11-24/`），模型文件在 `data/models/activity/2026-11-25/`。代码是 `src/analyse_dolibarr_client/activity.py`。
 > 它取代 lookalike PU 模型成为主打分方式。PU 模型回答的是「谁会成交」，不是用户要的问题（见 `docs/decisions.md` 2026-11-23）。
 
 ## 1. 要回答的问题
@@ -19,11 +19,14 @@
 | 文本 | `passage: ` + 简介前 1,500 个字符。LinkedIn 自动生成的模板简介（「X is a … company [based out of 地址, 城市, 国家]」）改写成「This organisation is a {行业} company.」，公司名、地址和国家都去掉 |
 | 向量 | `intfloat/multilingual-e5-large`（fastembed，本机 ONNX），权重在 `data/models/fastembed/` |
 | 向量缓存 | `data/models/embedding_cache/activity_e5large.npz`，按 sha256(模型名 + 文本) 存。训练和打分用同一套文本函数 |
-| 分类器 | 一个多项逻辑回归，C=30，共 44 类：37 个细分（`docs/segments/segments_v2.csv`）加 7 个非 prospect 标签 |
+| 分类器 | 一个多项逻辑回归，C=30，共 47 类：37 个细分（`docs/segments/segments_v2.csv`）加 10 个非 prospect 标签：consulting、supplier、competitor、school、media、other，以及 other 的 5 个子标签（见下）。`insufficient_info` 训练样本只有 6 个，已并入 other |
+| other 子标签 | 第二次三模型投票（多数票）：`other_sector_body`（协会、联合会、产业集群、认证机构、旅游推广机构）、`other_investor_owner`（基金、控股、地产业主）、`other_sector_vendor`（给目标行业卖软件或服务）、`other_single_small_site`（单店、小场所）、`other_unrelated`（其他无关）。这些「属于目标行业但不运营它」的组织，正是最常被误判成 prospect 的一类 |
+| 行业特征 | LinkedIn 行业的 one-hot（训练中出现 ≥5 次的 87 个行业，旧行业名先映射到新名称），取值 0.3，和文本向量拼在一起。训练时每条有行业的数据再加一份去掉行业的副本（权重减半），这样没有行业的页面也能正常打分。行业不是国家代理变量 |
 | 样本权重 | 类别平衡 × **语言系数**：让每种简介语言里 prospect 的比例都等于整体比例。语言只用来定权重，不是特征 |
 | `fit` | 37 个细分类别的概率之和 |
-| `label` | `fit ≥ 0.5` 时为 prospect，否则取概率最高的非 prospect 标签。评估和上线用同一个函数 `decide`。模板简介一律记为 `template_only` |
+| `label` | `fit ≥ 0.65` 时为 prospect（这个门槛让交叉验证中 prospect 的召回率保持在约 0.95；0.5 会让 43% 的 other 被判成 prospect），否则取概率最高的非 prospect 标签。评估和上线用同一个函数 `decide`。模板简介一律记为 `template_only` |
 | `segment` / `segment_prob` | prospect 前提下最可能的细分及其条件概率，另给第二候选。模板简介的细分只是候选，由 LinkedIn 行业按 `segments_v2.csv` 的 `linkedin_industries` 映射得到（旧行业名有别名表），没有概率；没有行业的模板页不给 `fit` |
+| `sales_label` / `category` | 给销售看的四类：prospect / competitor / template_only / not_target，细标签保留在 `label`。`category` 是细分所属的 10 个大类之一，比细分更可靠（交叉验证中细分完全判对 84%，大类判对 90%） |
 | 解释 | `similar_training_companies`：同一细分里和这家公司最相似的 3 家已标注公司。文本完全相同的那一家（就是它自己）跳过。只对 prospect 给出 |
 | 训练过的公司 | `train --oof-out` 生成 5 折 out-of-fold 分数，`score --oof` 用它替换文本相同的公司的分数（`score_source = out_of_fold`），这些分数来自没见过这家公司的模型 |
 | 一致性检查 | 模型里存了一段固定文本的向量，打分前用当前的向量模型重算一次，余弦相似度必须 ≥ 0.99 |
@@ -52,11 +55,25 @@
 
 | 检验集 | 规模 | AUC | 8 类准确率 | prospect 精确率 / 召回率 | 细分准确率 |
 |---|---:|---:|---:|---:|---:|
-| 交叉验证（原 3,000 家抽样中的干净行） | 2,266 | 0.970 | 0.82 | 0.84 / 0.99 | 0.80 |
-| 审核集（6 个模型中 ≥5 票一致） | 167 | 0.951 | 0.79 | 0.77 / 0.96 | 0.77 |
-| **三个模型 2 比 1 的行（没进训练）** | 735 | 0.776 | 0.49 | 0.48 / 0.92 | 0.53 |
+| 交叉验证（原 3,000 家抽样中的干净行） | 2,266 | 0.979 | 0.88 | 0.95 / 0.95 | 0.84 |
+| 审核集（6 个模型中 ≥5 票一致） | 167 | 0.976 | 0.85 | 0.90 / 0.92 | 0.87 |
+| **三个模型 2 比 1 的行（没进训练）** | 735 | 0.782 | 0.51 | 0.56 / 0.77 | 0.57 |
 
-客户检验集（432 家）：91% 被判为 prospect；细分与三模型多数票的一致率是 0.72。审核集也参与了选 C（10 / 30 / 100），所以它不完全是独立的测试集。
+8 类准确率在计算时，other 的子标签都算作 other。交叉验证中 other 的召回率是 0.75，supplier 是 0.64。客户检验集（432 家）：85% 被判为 prospect，细分与三模型多数票的一致率是 0.77。
+
+**拆分 other 的效果**（`training_labels_2026-11-24/other_split/experiment_results.csv`，prospect 召回率固定在 0.95）：
+- 交叉验证：prospect 精确率 0.937 → 0.949；other 被误判为 prospect 的比例 19.8% → 14.5%；
+- 审核集：other 召回率 0.54 → 0.81；other 被误判为 prospect 的比例 31% → 15%。
+
+另一种做法是训练时把非目标标签合并成一类，效果更差：prospect 精确率从 0.94 降到 0.89。所以只在给销售看的输出里合并。
+
+**和只用文本、门槛 0.5 的版本相比**（`train_eval_results.csv` 里四组对照）：
+- 8 类准确率：0.82 → 0.86；
+- other 召回率：0.40 → 0.64；
+- 细分准确率：交叉验证 0.80 → 0.85，审核集 0.77 → 0.85；
+- 代价是 prospect 召回率从 0.99 降到 0.95，客户被判为 prospect 的比例从 91% 降到 86%。
+
+改进分析时试过、但没有效果的办法：用三个模型的置信度做权重、用 2 比 1 的样本做软标签、两段式模型、kNN、MLP、不做类别平衡。审核集也参与了选 C（10 / 30 / 100），所以它不完全是独立的测试集。
 
 **这些数字都偏乐观。** 前两组的「真值」也来自模型投票，而且只收了模型意见一致的「容易」样本。2 比 1 那组是难样本，在那里模型明显偏向判成 prospect。
 
@@ -70,7 +87,7 @@
 - 只有模板简介的公司，尤其是法文的洗衣房和医疗机构，细分常常判错；
 - 零售电商和批发两个细分经常互相混淆。
 
-**语言偏差：** 同为非 prospect，法语简介的 fit 平均比英语高。加了语言权重后，差距从 0.108 降到 0.072。剩下的差距主要来自样本来源：在同一来源（服务器池）里，差距只有 0.03。第二轮审查者控制类别和来源后，差距已经不显著；用 12 对法英对译文本测试，fit 平均只差 −0.007。
+**语言偏差：** 同为非 prospect，法语简介的 fit 平均比英语高。加了语言权重后，差距从 0.108 降到 0.072；再加入行业特征和 other 子标签后降到 0.033。剩下的差距主要来自样本来源：在同一来源（服务器池）里，差距只有 0.03。第二轮审查者控制类别和来源后，差距已经不显著；用 12 对法英对译文本测试，fit 平均只差 −0.007。
 
 对比过的其他做法：
 - TF-IDF 词袋：AUC 0.93，细分准确率 0.57，而且文本语言本身就是国家的代理变量；
@@ -96,10 +113,10 @@
 uv run python -m analyse_dolibarr_client.activity train \
   --labels data/external/server_companies/2026-11-23/training_labels_2026-11-24/labels.csv \
   --eval-results data/external/server_companies/2026-11-23/training_labels_2026-11-24/train_eval_results.csv \
-  --out data/models/activity/2026-11-24 --oof-out data/models/activity/2026-11-24/oof_scores.csv
+  --out data/models/activity/2026-11-25 --oof-out data/models/activity/2026-11-25/oof_scores.csv
 
 uv run python -m analyse_dolibarr_client.activity score \
-  --model data/models/activity/2026-11-24 --oof data/models/activity/2026-11-24/oof_scores.csv \
+  --model data/models/activity/2026-11-25 --oof data/models/activity/2026-11-25/oof_scores.csv \
   --input companies.csv --output scores.csv
 ```
 

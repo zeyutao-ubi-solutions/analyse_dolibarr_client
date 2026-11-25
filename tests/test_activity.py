@@ -16,6 +16,8 @@ from analyse_dolibarr_client.activity import (
     priority,
     score_companies,
     thin_text,
+    industry_features,
+    normalize_industry,
     is_template,
     size_evidence,
     out_of_fold,
@@ -171,8 +173,9 @@ def test_priority_rules():
 def test_decide_label_follows_fit_threshold():
     classes = np.array(["industrial_laundry", "hotels_hospitality", "other", "consulting"])
     P = np.array([[0.25, 0.20, 0.30, 0.25], [0.30, 0.25, 0.30, 0.15]])
-    d = decide(P, classes)
+    d = decide(P, classes, threshold=0.5)
     assert list(d["label"]) == ["other", "prospect"]
+    assert list(decide(P, classes)["label"]) == ["other", "other"]  # default threshold 0.65
     assert d["segment_prob"][1] == pytest.approx(0.30 / 0.55)
 
 
@@ -271,3 +274,56 @@ def test_out_of_fold_replaces_scores_of_trained_texts():
     assert list(t["score_source"]) == ["out_of_fold", "model"]
     assert t.loc[0, "fit"] == pytest.approx(oof.set_index("text_key").loc[text_key(rows.loc[0, "description"]), "fit"])
     assert t.loc[1, "fit"] == s.loc[1, "fit"]
+
+
+def test_normalize_industry_maps_old_linkedin_names():
+    assert normalize_industry(" Textiles ") == "textile manufacturing"
+    assert normalize_industry("Hospitality") == "hospitality"
+    assert normalize_industry(None) == ""
+
+
+def test_industry_features_one_hot():
+    M = industry_features(["Hospitality", "textiles", None, "Unknown"], ["hospitality", "textile manufacturing"], weight=0.3)
+    np.testing.assert_allclose(M, [[0.3, 0], [0, 0.3], [0, 0], [0, 0]])
+
+
+def _labels_with_industry():
+    lab = _labels()
+    ind = {"industrial_laundry": "Laundry and Drycleaning Services", "hotels_hospitality": "Hospitality",
+           "research_labs": "Research Services", "other": "Law Practice", "consulting": "Business Consulting"}
+    lab["industry"] = [ind.get(n.rsplit("-", 1)[0]) for n in lab["company_name"]]
+    return lab
+
+
+def test_industry_feature_is_learned_and_optional(tmp_path):
+    lab = _labels_with_industry()
+    model = train_from_labels(lab, EMB, EmbeddingCache(None, EMB.name), C=10)
+    assert "hospitality" in set(model.industry_vocab) and model.coef.shape[1] == 256 + len(model.industry_vocab)
+    model.save(tmp_path)
+    model = ActivityModel.load(tmp_path)
+    text = "a place offering beds and breakfast"
+    with_ind = score_companies(model, pd.DataFrame({"description": [text], "industry": ["Hospitality"]}), EMB, SEGMENTS)
+    without = score_companies(model, pd.DataFrame({"description": [text]}), EMB, SEGMENTS)
+    assert with_ind.loc[0, "segment"] == "hotels_hospitality"
+    assert with_ind.loc[0, "fit"] != without.loc[0, "fit"]  # scored without an industry too
+
+
+def test_out_of_fold_uses_industries():
+    lab = _labels_with_industry()
+    oof = out_of_fold(lab, EMB, EmbeddingCache(None, EMB.name), C=10, folds=3)
+    assert oof["fit"].between(0, 1).all() and len(oof) == len(training_rows(lab))
+
+
+def test_sales_label_and_category():
+    model = _model()
+    segs = SEGMENTS.assign(category=["布草、纺织与工服", "布草、纺织与工服", "医疗与公共服务"])
+    comp = pd.DataFrame({"description": [TEXTS["industrial_laundry"], TEXTS["other"], TEXTS["consulting"], TEMPLATE]})
+    s = score_companies(model, comp, EMB, segs)
+    assert list(s["sales_label"]) == ["prospect", "not_target", "not_target", "template_only"]
+    assert s.loc[0, "category"] == "布草、纺织与工服" and s.loc[1, "category"] is None
+
+
+def test_insufficient_info_is_folded_into_other():
+    lab = _labels()
+    lab.loc[lab["cons_label"].eq("other"), "cons_label"] = "insufficient_info"
+    assert "insufficient_info" not in set(training_rows(lab)["y"])

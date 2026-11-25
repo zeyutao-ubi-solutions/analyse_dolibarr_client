@@ -4,11 +4,12 @@ Reframed 2026-11-23: score any company on *what it does*, never on country. Two 
 (decided 2026-11-24):
 
 - ``fit``: a ranking score for "the company is an end user in one of the target segments", plus
-  the segment. ``label`` is ``prospect`` when ``fit >= 0.5``, else the likeliest non-prospect label;
+  the segment. ``label`` is ``prospect`` when ``fit >= 0.65``, else the likeliest non-prospect label;
 - ``priority``: a sales ordering. ``low`` for prospects under 51 employees or in a low-priority
   segment (research labs). Low priority is never an exclusion.
 
-Model: multilingual-e5-large vector of the description -> one multinomial logistic regression over
+Model: multilingual-e5-large vector of the description + a one-hot of the LinkedIn industry -> one
+multinomial logistic regression over
 44 classes: 37 segments of ``docs/segments/segments_v2.csv`` plus 7 non-prospect labels. ``fit`` is
 the summed probability of the segment classes. Labels come from a 3-model vote (gpt-6.2-sol,
 Sonnet, Haiku) on name, industry, size and description; only rows where all three agree are used.
@@ -50,12 +51,19 @@ TEXT_PREFIX = "passage: "
 MAX_DESCRIPTION_CHARS = 1500
 THIN_TEXT_WORDS = 20
 SMALL_COMPANY_EMPLOYEES = 51
-PROSPECT_THRESHOLD = 0.5
+PROSPECT_THRESHOLD = 0.65  # keeps OOF prospect recall ~0.95 (0.5 let 43% of "other" through; 0.7 once "other" was split)
+INDUSTRY_WEIGHT = 0.3  # value of the LinkedIn-industry one-hot next to the unit-length text vector
+INDUSTRY_MIN_ROWS = 5  # industries seen fewer times in training get no feature
+INDUSTRY_DROPOUT_WEIGHT = 0.5  # weight of the industry-blanked copy of each training row
 DEFAULT_C = 30.0
 N_EXAMPLES = 3
 SAME_TEXT_SIMILARITY = 0.999
 MIN_LANGUAGE_ROWS = 30
-NON_PROSPECT = ("other", "consulting", "supplier", "competitor", "school", "media", "insufficient_info")
+# "other" split by a second 3-model vote (2026-11-25): companies of a target industry that do not run it are
+# the commonest false prospects, so the model gets them as explicit classes.
+OTHER_SUBTYPES = ("sector_body", "investor_owner", "sector_vendor", "single_small_site", "unrelated")
+NON_PROSPECT = ("other", "consulting", "supplier", "competitor", "school", "media", "insufficient_info") + tuple(
+    f"other_{t}" for t in OTHER_SUBTYPES)
 DEFAULT_SEGMENTS = Path("docs/segments/segments_v2.csv")
 DEFAULT_WEIGHTS_DIR = Path("data/models/fastembed")
 DEFAULT_CACHE = Path("data/models/embedding_cache/activity_e5large.npz")
@@ -170,6 +178,23 @@ def industry_candidates(segments: pd.DataFrame) -> dict[str, list[str]]:
         if new in out:
             out.setdefault(old, list(out[new]))
     return out
+
+
+def normalize_industry(industry) -> str:
+    """LinkedIn industry, lower case, older names mapped to the current taxonomy."""
+    v = re.sub(r"\s+", " ", _clean(industry)).strip().lower()
+    return INDUSTRY_ALIASES.get(v, v)
+
+
+def industry_features(industries: Sequence, vocab: Sequence[str], weight: float = INDUSTRY_WEIGHT) -> np.ndarray:
+    """One-hot of the LinkedIn industry over ``vocab`` (all zeros when missing or unseen)."""
+    idx = {v: i for i, v in enumerate(vocab)}
+    M = np.zeros((len(industries), len(vocab)), dtype=np.float32)
+    for r, v in enumerate(industries):
+        j = idx.get(normalize_industry(v))
+        if j is not None:
+            M[r, j] = weight
+    return M
 
 
 def company_text(description) -> str:
@@ -366,7 +391,11 @@ def training_rows(labels: pd.DataFrame) -> pd.DataFrame:
     prospect = df["cons_label"].eq("prospect")
     if (prospect & df["cons_segment"].fillna("").eq("")).any():
         raise ValueError("clean prospect rows without a segment")
-    df["y"] = np.where(prospect, df["cons_segment"], df["cons_label"])
+    # insufficient_info had 6 clean rows: too few to learn; thin and template pages are flagged separately
+    df["y"] = np.where(prospect, df["cons_segment"], df["cons_label"].replace({"insufficient_info": "other"}))
+    if "other_subtype" in df.columns:  # majority of the 3-model sub-label vote, see OTHER_SUBTYPES
+        sub = df["other_subtype"].where(df["other_subtype"].isin(OTHER_SUBTYPES))
+        df["y"] = np.where(df["y"].eq("other") & sub.notna(), "other_" + sub.fillna(""), df["y"])
     ev = labels[~labels["split"].eq("train")]
     if "linkedin_company_url" in labels.columns:
         ev_slugs = set(ev["linkedin_company_url"].map(linkedin_slug)) - {None}
@@ -415,10 +444,23 @@ class ActivityModel:
     ref_names: np.ndarray
     ref_segments: np.ndarray
     probe_vector: np.ndarray  # vector of PROBE_TEXT, to check the scoring embedder
+    industry_vocab: np.ndarray = field(default_factory=lambda: np.array([], dtype=str))
     meta: dict = field(default_factory=dict)
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        return _softmax(X @ self.coef.T + self.intercept)
+    @property
+    def threshold(self) -> float:
+        return float(self.meta.get("prospect_threshold", PROSPECT_THRESHOLD))
+
+    def features(self, X: np.ndarray, industries: Sequence | None = None) -> np.ndarray:
+        """Text vectors plus the LinkedIn-industry one-hot (zeros when no industry is given)."""
+        if not len(self.industry_vocab):
+            return X
+        ind = industries if industries is not None else [None] * len(X)
+        return np.hstack([X, industry_features(ind, self.industry_vocab, self.meta.get("industry_weight", INDUSTRY_WEIGHT))])
+
+    def predict_proba(self, X: np.ndarray, industries: Sequence | None = None) -> np.ndarray:
+        """``X``: text vectors (the industry columns are added here)."""
+        return _softmax(self.features(X, industries) @ self.coef.T + self.intercept)
 
     def save(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
@@ -426,6 +468,7 @@ class ActivityModel:
             directory / "model.npz", classes=self.classes.astype(str), coef=self.coef, intercept=self.intercept,
             ref_vectors=self.ref_vectors.astype(np.float16), ref_names=self.ref_names.astype(str),
             ref_segments=self.ref_segments.astype(str), probe_vector=self.probe_vector.astype(np.float32),
+            industry_vocab=self.industry_vocab.astype(str),
         )
         (directory / "meta.json").write_text(json.dumps(self.meta, indent=2, ensure_ascii=False) + "\n")
 
@@ -433,8 +476,9 @@ class ActivityModel:
     def load(cls, directory: Path) -> "ActivityModel":
         z = np.load(directory / "model.npz", allow_pickle=False)
         meta = json.loads((directory / "meta.json").read_text())
+        vocab = z["industry_vocab"] if "industry_vocab" in z.files else np.array([], dtype=str)
         return cls(z["classes"], z["coef"], z["intercept"], z["ref_vectors"].astype(np.float32),
-                   z["ref_names"], z["ref_segments"], z["probe_vector"], meta)
+                   z["ref_names"], z["ref_segments"], z["probe_vector"], vocab, meta)
 
     def check_embedder(self, embedder: Embedder) -> None:
         if embedder.name != self.meta.get("embedding_model"):
@@ -445,25 +489,42 @@ class ActivityModel:
 
 
 def fit(X: np.ndarray, y: Sequence[str], names: Sequence[str], probe_vector: np.ndarray, C: float = DEFAULT_C,
-        sample_weight: np.ndarray | None = None, meta: dict | None = None) -> ActivityModel:
+        sample_weight: np.ndarray | None = None, meta: dict | None = None,
+        industries: Sequence | None = None) -> ActivityModel:
+    """Multinomial logistic regression on text vectors (+ LinkedIn-industry one-hot when ``industries``).
+
+    With industries, every training row that has one is added a second time with the industry blanked
+    (weight ``INDUSTRY_DROPOUT_WEIGHT``), so pages without an industry are scored sensibly too.
+    """
     from sklearn.linear_model import LogisticRegression
 
     y = np.asarray(y, dtype=str)
     if len(np.unique(y)) < 3:
         raise ValueError("need at least 3 classes (binary coef_ has one row and breaks the softmax)")
-    if sample_weight is None:
-        lr = LogisticRegression(C=C, max_iter=4000, class_weight="balanced").fit(X, y)
-    else:
-        lr = LogisticRegression(C=C, max_iter=4000).fit(X, y, sample_weight=sample_weight)
+    w = np.asarray(sample_weight, dtype=float) if sample_weight is not None else training_weights(y, ["all"] * len(y))
+    vocab = np.array([], dtype=str)
+    Xf, yf, wf = X, y, w
+    if industries is not None:
+        norm = pd.Series([normalize_industry(v) for v in industries])
+        counts = norm[norm.ne("")].value_counts()
+        vocab = np.array(sorted(counts[counts >= INDUSTRY_MIN_ROWS].index), dtype=str)
+        F = industry_features(list(industries), vocab)
+        has = F.any(axis=1)
+        Xf = np.vstack([np.hstack([X, F]), np.hstack([X[has], np.zeros_like(F[has])])])
+        yf = np.concatenate([y, y[has]])
+        wf = np.concatenate([w, w[has] * INDUSTRY_DROPOUT_WEIGHT])
+    lr = LogisticRegression(C=C, max_iter=4000).fit(Xf, yf, sample_weight=wf)
     ref = ~np.isin(y, NON_PROSPECT)
     return ActivityModel(
         classes=lr.classes_.astype(str), coef=lr.coef_.astype(np.float32), intercept=lr.intercept_.astype(np.float32),
         ref_vectors=X[ref], ref_names=np.asarray(names, dtype=str)[ref], ref_segments=y[ref],
-        probe_vector=np.asarray(probe_vector, dtype=np.float32), meta=dict(meta or {}, C=C),
+        probe_vector=np.asarray(probe_vector, dtype=np.float32), industry_vocab=vocab,
+        meta=dict(meta or {}, C=C, prospect_threshold=PROSPECT_THRESHOLD, industry_weight=INDUSTRY_WEIGHT,
+                  industry_dropout_weight=INDUSTRY_DROPOUT_WEIGHT, n_industries=int(len(vocab))),
     )
 
 
-def decide(P: np.ndarray, classes: np.ndarray) -> dict[str, np.ndarray]:
+def decide(P: np.ndarray, classes: np.ndarray, threshold: float = PROSPECT_THRESHOLD) -> dict[str, np.ndarray]:
     """From class probabilities: fit, label, top-2 segments with their probability given prospect."""
     seg_mask = ~np.isin(classes, NON_PROSPECT)
     seg_classes, Ps, Pn = classes[seg_mask], P[:, seg_mask], P[:, ~seg_mask]
@@ -475,7 +536,7 @@ def decide(P: np.ndarray, classes: np.ndarray) -> dict[str, np.ndarray]:
     best_non = non[Pn.argmax(axis=1)] if Pn.shape[1] else np.full(len(P), "other")
     return {
         "fit": fit_,
-        "label": np.where(fit_ >= PROSPECT_THRESHOLD, "prospect", best_non),
+        "label": np.where(fit_ >= threshold, "prospect", best_non),
         "segment": seg_classes[top[:, 0]],
         "segment_prob": cond[rows, top[:, 0]],
         "segment_2": seg_classes[top[:, 1]],
@@ -485,8 +546,8 @@ def decide(P: np.ndarray, classes: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
-def score_vectors(model: ActivityModel, X: np.ndarray) -> pd.DataFrame:
-    d = decide(model.predict_proba(X), model.classes)
+def score_vectors(model: ActivityModel, X: np.ndarray, industries: Sequence | None = None) -> pd.DataFrame:
+    d = decide(model.predict_proba(X, industries), model.classes, model.threshold)
     examples = []
     for i in range(len(X)):
         in_seg = np.flatnonzero(model.ref_segments == d["segment"][i])
@@ -516,7 +577,7 @@ def score_companies(model: ActivityModel, companies: pd.DataFrame, embedder: Emb
     desc = companies["description"] if "description" in companies.columns else pd.Series("", index=companies.index)
     texts = [company_text(d) for d in desc]
     X = (cache or EmbeddingCache(None, embedder.name)).get(texts, embedder)
-    s = score_vectors(model, X)
+    s = score_vectors(model, X, list(_first(companies, "industry")))
     s.index = companies.index
     seg_prio = dict(zip(segments["segment_id"], segments["segment_priority"].fillna("normal")))
     names = dict(zip(segments["segment_id"], segments["name_zh"]))
@@ -545,6 +606,20 @@ def score_companies(model: ActivityModel, companies: pd.DataFrame, embedder: Emb
     s["priority_reason"] = [r for _, r in pr]
     s["template_text"] = template
     s["thin_text"] = desc.map(thin_text).values
+    return add_sales_columns(s, segments)
+
+
+SALES_LABELS = {"prospect": "prospect", "competitor": "competitor", "template_only": "template_only"}
+
+
+def add_sales_columns(s: pd.DataFrame, segments: pd.DataFrame) -> pd.DataFrame:
+    """``sales_label``: prospect / competitor / template_only / not_target (the fine label stays in
+    ``label``), and ``category``: the segment's group in segments_v2.csv (prospects and template pages)."""
+    s = s.copy()
+    s["sales_label"] = s["label"].map(SALES_LABELS).fillna("not_target")
+    cat = dict(zip(segments["segment_id"], segments["category"])) if "category" in segments.columns else {}
+    has_seg = s["label"].isin(["prospect", "template_only"])
+    s["category"] = s["segment"].map(cat).astype(object).where(has_seg, None)
     return s
 
 
@@ -562,12 +637,15 @@ def train_from_labels(labels: pd.DataFrame, embedder: Embedder, cache: Embedding
     langs = rows["description"].map(description_language)
     w = training_weights(rows["y"], langs)
     probe = embedder.embed([PROBE_TEXT])[0]
+    industries = list(rows["industry"]) if "industry" in rows.columns else None
     meta = dict(meta or {}, embedding_model=embedder.name, n_train=int(len(rows)),
                 n_prospect=int((~rows["y"].isin(NON_PROSPECT)).sum()),
                 class_counts=rows["y"].value_counts().to_dict(), language_counts=langs.value_counts().to_dict(),
                 text=f"'{TEXT_PREFIX}' + description without template address, first {MAX_DESCRIPTION_CHARS} chars",
-                weights="balanced classes x language factor (equal prospect share per language)")
-    return fit(X, rows["y"], rows["company_name"].fillna(rows["item_id"]), probe, C=C, sample_weight=w, meta=meta)
+                weights="balanced classes x language factor (equal prospect share per language)",
+                features="text vector + LinkedIn industry one-hot (industry-blanked copies at half weight)")
+    return fit(X, rows["y"], rows["company_name"].fillna(rows["item_id"]), probe, C=C, sample_weight=w, meta=meta,
+               industries=industries)
 
 
 OOF_COLUMNS = ("fit", "label", "segment", "segment_prob", "segment_2", "segment_2_prob", "top_non_prospect", "top_non_prospect_prob")
@@ -594,9 +672,10 @@ def out_of_fold(labels: pd.DataFrame, embedder: Embedder, cache: EmbeddingCache,
     strat = np.where(rows["y"].map(rows["y"].value_counts()) >= folds, y, "rare")
     P = np.zeros((len(y), len(classes)))
     probe = np.zeros(X.shape[1], dtype=np.float32)
+    ind = np.asarray(rows["industry"] if "industry" in rows.columns else [None] * len(rows), dtype=object)
     for a, b in StratifiedKFold(folds, shuffle=True, random_state=seed).split(X, strat):
-        m = fit(X[a], y[a], y[a], probe, C=C, sample_weight=training_weights(y[a], langs[a]))
-        P[np.ix_(b, np.searchsorted(classes, m.classes))] = m.predict_proba(X[b])
+        m = fit(X[a], y[a], y[a], probe, C=C, sample_weight=training_weights(y[a], langs[a]), industries=list(ind[a]))
+        P[np.ix_(b, np.searchsorted(classes, m.classes))] = m.predict_proba(X[b], list(ind[b]))
     d = decide(P, classes)
     out = pd.DataFrame({k: d[k] for k in OOF_COLUMNS})
     out.insert(0, "item_id", rows["item_id"].values)
@@ -623,7 +702,7 @@ def apply_out_of_fold(companies: pd.DataFrame, scores: pd.DataFrame, oof: pd.Dat
                         None if pd.isna(s.iloc[i]["declared_range_lower"]) else int(s.iloc[i]["declared_range_lower"]),
                         None if pd.isna(s.iloc[i]["linkedin_members"]) else int(s.iloc[i]["linkedin_members"]))
         s.iat[i, s.columns.get_loc("priority")], s.iat[i, s.columns.get_loc("priority_reason")] = p, r
-    return s
+    return add_sales_columns(s, segments)
 
 
 def cmd_train(a) -> int:

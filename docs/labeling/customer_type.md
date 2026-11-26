@@ -1,55 +1,55 @@
-# 标注指南：客户类型（customer_type）
+# Labelling guide: customer type (customer_type)
 
-用于 lookalike（ICP 相似度）模型：只有 **终端用户** 进正样本。集成商、经销商、同行如果混进正样本，模型会学成「找集成商」。
+Used for the lookalike (ICP similarity) model: only **end users** go into the positive samples. If integrators, resellers or peers get mixed into the positives, the model learns to "find integrators".
 
-- 标注表：`data/processed/<snapshot>/labeling/customer_type_labels.csv`（UTF-8 BOM，可直接用 Excel 打开）
-- 重新生成：`uv run python -m analyse_dolibarr_client.lookalike --snapshot <snapshot>`
-  - 只刷新上下文列、补上新客户；**已填写的标注列不会被覆盖**，旧文件会先备份到 `labeling/history/`。
-  - 填了不合法的值会报错并列出行号，不会静默忽略。
+- Labelling sheet: `data/processed/<snapshot>/labeling/customer_type_labels.csv` (UTF-8 BOM, opens directly in Excel)
+- Regenerate: `uv run python -m analyse_dolibarr_client.lookalike --snapshot <snapshot>`
+  - Only refreshes the context columns and adds new customers; **labelling columns already filled in are never overwritten**, and the old file is first backed up to `labeling/history/`.
+  - Invalid values raise an error listing the row numbers; they are never silently ignored.
 
-## 要填的列
+## Columns to fill in
 
-| 列 | 取值 | 说明 |
+| Column | Values | Notes |
 |---|---|---|
-| `customer_type` | 见下表 | 必填；拿不准就填 `unsure`，不要猜 |
+| `customer_type` | See table below | Required; if unsure, enter `unsure`, do not guess |
 | `confidence` | `high` / `medium` / `low` | |
-| `evidence_url` | URL | 判断依据：官网「关于我们」、LinkedIn 主页、societe.com 等 |
-| `annotator` | 姓名缩写 | |
+| `evidence_url` | URL | Basis for the judgement: website "About us", LinkedIn page, societe.com, etc. |
+| `annotator` | Initials | |
 | `labeled_at` | `YYYY-MM-DD` | |
-| `comment` | 自由文本 | 尤其是 `unsure` 时写明卡在哪 |
+| `comment` | Free text | Especially for `unsure`, state where you got stuck |
 
-其余列（`priority`、`suggested_type`、金额、品类、`notes`…）是参考信息，不要改。
+The other columns (`priority`, `suggested_type`, amounts, categories, `notes`…) are reference information; do not change them.
 
-## customer_type 取值
+## customer_type values
 
-| 值 | 定义 | 例子 / 线索 |
+| Value | Definition | Examples / clues |
 |---|---|---|
-| `end_user` | 自己使用我们的产品/服务（洗衣厂、物流仓、工厂、医院、酒店、零售…） | `GEODIS LOGISTICS`、`ILUNION TEXTIL` |
-| `integrator_reseller` | 买来转卖或集成给自己的客户：IT 集成商、经销商、系统商、方案商 | 名字含 SYSTEMS / INFORMATIQUE / DISTRIBUTION 且业务是 IT；订单名是另一家公司（`lookup_name_conflict`）；同时是我们的供应商 |
-| `competitor` | 和我们卖同类 RFID / IoT / 追溯方案的公司 | 官网主营 RFID 标签、读写器、追溯软件 |
-| `intercompany` | 集团内部公司（Ubi Solutions、Page Up、Ubi Smart、Ubi Impact 及其子公司） | 通常已自动排除；漏网的标这里 |
-| `not_a_company` | 个人、测试账户、内部占位客户 | 「DIVERS」「CLIENT TEST」、个人姓名 |
-| `unsure` | 查了仍无法判断 | 视同未标注，按 `suggested_type` 处理 |
+| `end_user` | Uses our products/services itself (laundries, logistics warehouses, factories, hospitals, hotels, retail…) | `GEODIS LOGISTICS`, `ILUNION TEXTIL` |
+| `integrator_reseller` | Buys to resell or integrate for its own customers: IT integrators, resellers, system vendors, solution providers | Name contains SYSTEMS / INFORMATIQUE / DISTRIBUTION and the business is IT; the order name is another company (`lookup_name_conflict`); also one of our suppliers |
+| `competitor` | Sells the same kind of RFID / IoT / traceability solutions as we do | Website mainly sells RFID tags, readers, traceability software |
+| `intercompany` | Group intercompany entity (Ubi Solutions, Page Up, Ubi Smart, Ubi Impact and their subsidiaries) | Usually excluded automatically; label any that slipped through here |
+| `not_a_company` | Individuals, test accounts, internal placeholder customers | "DIVERS", "CLIENT TEST", personal names |
+| `unsure` | Still undecidable after checking | Treated as unlabelled, handled per `suggested_type` |
 
-判断规则：
+Decision rules:
 
-1. **看他们拿我们的东西干什么，不看他们是谁。** 大集团的 IT 子公司如果是给集团自己用，算 `end_user`。
-2. **订单名和档案名不同（`order_name_differs`）时**，档案名是开票方：
-   - 开票方是 IT/方案公司、订单名是终端客户（`EXERTIS AZENN` 开票、订单名「Orange」）→ `integrator_reseller`
-   - 只是品牌名 vs 法定名（`SECANETA` → JOSÉ ALBERO PUERTO）或集团 vs 子公司（`S Transport` → BOVIS Transport）→ `end_user`
-3. **同时是供应商（`also_supplier`）** 不等于集成商：我们也会向客户采购服务。看主营业务。
-4. 混合型（既自用又转卖）按金额大的那部分判断，`comment` 写明。
+1. **Look at what they do with our products, not at who they are.** The IT subsidiary of a large group counts as `end_user` if it uses them for the group itself.
+2. **When the order name and the third-party record name differ (`order_name_differs`)**, the record name is the invoiced party:
+   - The invoiced party is an IT/solutions company and the order name is the end customer (`EXERTIS AZENN` invoiced, order name "Orange") → `integrator_reseller`
+   - Just brand name vs legal name (`SECANETA` → JOSÉ ALBERO PUERTO) or group vs subsidiary (`S Transport` → BOVIS Transport) → `end_user`
+3. **Also being a supplier (`also_supplier`)** does not mean integrator: we also buy services from customers. Look at the core business.
+4. Mixed cases (both own use and resale): decide by the part with the larger amount, and explain in `comment`.
 
-## 先标哪些
+## What to label first
 
-按 `priority` 排序，从上往下：
+Sort by `priority`, top to bottom:
 
-- **P1**：疑似集成商、同时是供应商、订单名和档案名不同 —— 最可能不是终端用户，必须人工看
-- **P2**：金额前 90% 的客户，或域名和公司名对不上
-- **P3**：其余 —— 默认按 `suggested_type`，抽样检查即可
+- **P1**: suspected integrators, also suppliers, order name differs from record name: the most likely to not be end users, must be reviewed manually
+- **P2**: customers in the top 90% by amount, or whose domain and company name do not match
+- **P3**: the rest: default to `suggested_type`, spot checks are enough
 
-## 质量控制
+## Quality control
 
-- 正式开始前，两个人独立标同一批 **P1 全部 + P2 随机 30 条**，计算一致性（Cohen's kappa）。低于 0.7 先对齐规则、更新本指南，再继续。
-- 之后每 200 条随机抽 10% 交叉复核。
-- 规则有变化时更新本文件，并在 `comment` 里注明受影响的行。
+- Before starting for real, two people independently label the same batch of **all P1 + 30 random P2**, and compute agreement (Cohen's kappa). Below 0.7, first align the rules and update this guide, then continue.
+- After that, cross-check a random 10% of every 200 rows.
+- When the rules change, update this file and note the affected rows in `comment`.

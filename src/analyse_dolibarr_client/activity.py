@@ -357,18 +357,18 @@ def priority(label: str, segment: str, segment_priority: dict[str, str], declare
     """
     big = SMALL_COMPANY_EMPLOYEES
     if label == "prospect" and segment_priority.get(segment) == "low":
-        return "low", f"细分优先级低（{segment}）/ segment à priorité basse"
+        return "low", f"low-priority segment ({segment}) / segment à priorité basse"
     if declared is not None and declared < big:
         if members is not None and members >= big:
-            return "normal", f"声明人数段 <{big}，但 LinkedIn 已有 {members} 名成员 / tranche < {big} mais {members} membres LinkedIn"
-        return "low", f"声明人数段 <{big} 人 / moins de {big} salariés (tranche déclarée)"
+            return "normal", f"declared employee range <{big}, but LinkedIn already has {members} members / tranche < {big} mais {members} membres LinkedIn"
+        return "low", f"declared employee range <{big} employees / moins de {big} salariés (tranche déclarée)"
     if declared is not None:
-        return "normal", f"声明人数段 ≥{big} 人 / au moins {big} salariés (tranche déclarée)"
+        return "normal", f"declared employee range ≥{big} employees / au moins {big} salariés (tranche déclarée)"
     if members is not None and members >= big:
-        return "normal", f"无声明人数段，LinkedIn 成员 ≥{members} / pas de tranche, au moins {members} membres"
+        return "normal", f"no declared employee range, LinkedIn members ≥{members} / pas de tranche, au moins {members} membres"
     if members is not None:
-        return "unknown_size", f"无声明人数段，LinkedIn 成员仅 {members} 名 / pas de tranche, seulement {members} membres"
-    return "unknown_size", "无规模信息 / taille inconnue"
+        return "unknown_size", f"no declared employee range, only {members} LinkedIn members / pas de tranche, seulement {members} membres"
+    return "unknown_size", "no size information / taille inconnue"
 
 
 # ------------------------------------------------------------------------------ training data
@@ -580,7 +580,7 @@ def score_companies(model: ActivityModel, companies: pd.DataFrame, embedder: Emb
     s = score_vectors(model, X, list(_first(companies, "industry")))
     s.index = companies.index
     seg_prio = dict(zip(segments["segment_id"], segments["segment_priority"].fillna("normal")))
-    names = dict(zip(segments["segment_id"], segments["name_zh"]))
+    names = dict(zip(segments["segment_id"], segments["name_en"]))
     template = desc.map(is_template).values
     # Template pages: the model only sees "This organisation is a <industry> company", too little to pick a
     # segment. Candidates come from the LinkedIn industry -> segment table instead; fit stays as a rough hint.
@@ -596,7 +596,7 @@ def score_companies(model: ActivityModel, companies: pd.DataFrame, embedder: Emb
         if not ind:
             s.iat[i, s.columns.get_loc("fit")] = np.nan
     s.loc[~s["label"].eq("prospect"), "similar_training_companies"] = ""
-    s.insert(3, "segment_name_zh", s["segment"].map(names))
+    s.insert(3, "segment_name_en", s["segment"].map(names))
     ranges = _first(companies, "employee_count_range")
     sizes = [size_evidence(c, r) for c, r in zip(_first(companies, "employee_count", "employees"), ranges)]
     pr = [priority(lab, seg, seg_prio, d, m) for lab, seg, (d, m) in zip(s["label"], s["segment"], sizes)]
@@ -693,7 +693,7 @@ def apply_out_of_fold(companies: pd.DataFrame, scores: pd.DataFrame, oof: pd.Dat
     s["score_source"] = np.where(hit, "out_of_fold", "model")
     for c in OOF_COLUMNS:
         s.loc[hit, c] = o.loc[keys[hit], c].values
-    s.loc[hit, "segment_name_zh"] = s.loc[hit, "segment"].map(dict(zip(segments["segment_id"], segments["name_zh"])))
+    s.loc[hit, "segment_name_en"] = s.loc[hit, "segment"].map(dict(zip(segments["segment_id"], segments["name_en"])))
     seg_prio = dict(zip(segments["segment_id"], segments["segment_priority"].fillna("normal")))
     for i in np.flatnonzero(hit):
         if s.iloc[i]["label"] not in ("prospect",):

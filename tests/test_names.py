@@ -91,9 +91,9 @@ def test_integrator_keywords_narrow():
 
 
 def test_name_notes():
-    assert "名称含分支/地点后缀" in name_notes("TCS - GROUPE STERNE")
-    assert "名称含括号限定" in name_notes("EDF (FR)")
-    assert name_notes(None) == ["无客户名称"]
+    assert "name has a branch/location suffix" in name_notes("TCS - GROUPE STERNE")
+    assert "name has a parenthesised qualifier" in name_notes("EDF (FR)")
+    assert name_notes(None) == ["no customer name"]
     assert name_notes("HERTA") == []
 
 

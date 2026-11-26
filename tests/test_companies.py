@@ -185,7 +185,7 @@ def test_cooccurrence_pairs(result):
 
 def test_readme_renders(snap, result):
     text = render_readme(snap, result, SNAP_DATE)
-    assert "主名单" in text and "buyer_pattern" in text
+    assert "master list" in text and "buyer_pattern" in text
 
 
 @pytest.mark.parametrize(
@@ -226,7 +226,7 @@ def test_history_truncated(result):
     assert not _row(result, "c-exact")["history_truncated"]
     assert _row(result, "c-interco")["history_truncated"]
     assert not _row(result, "42")["history_truncated"]  # Page Up + Ubi Solutions
-    assert "订单历史可能不全" not in str(_row(result, "42")["notes"])
+    assert "order history may be incomplete" not in str(_row(result, "42")["notes"])
     assert "history_truncated" in result.companies.columns
 
 

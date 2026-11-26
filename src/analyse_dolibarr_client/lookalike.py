@@ -401,10 +401,10 @@ def country_factors(units: pd.DataFrame, existing: pd.DataFrame | None = None) -
     if "unknown" in g.index:
         g.loc["unknown", ["historical_rate", "rate_ci95_low", "rate_ci95_high", "smoothed_rate", "suggested_factor"]] = None
     g["auto_note"] = [
-        "国家缺失（只有潜在客户会缺），比率无意义；先补国家或人工定系数"
+        "country missing (only prospects can lack one), rate is meaningless; fill in the country first or set the factor by hand"
         if c == "unknown"
-        else "参照国" if c == REFERENCE_COUNTRY
-        else "正样本不足 5 个，建议值主要来自先验，建议人工定" if k < 5
+        else "reference country" if c == REFERENCE_COUNTRY
+        else "fewer than 5 positives, the suggested value comes mostly from the prior; set it by hand" if k < 5
         else ""
         for c, k in zip(g.index, g["n_positive_units"])
     ]

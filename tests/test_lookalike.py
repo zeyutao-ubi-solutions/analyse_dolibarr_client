@@ -190,7 +190,7 @@ def test_country_factors_shrink_small_countries_and_skip_unknown():
     assert f.loc["PT", "suggested_factor"] < 0.5
     assert pd.isna(f.loc["unknown", "suggested_factor"])
     assert f.loc["unknown", "factor_source"] == "missing"
-    assert "建议人工定" in f.loc["PT", "auto_note"]
+    assert "set it by hand" in f.loc["PT", "auto_note"]
 
 
 def test_country_factors_keep_manual_override_and_validate():

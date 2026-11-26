@@ -30,7 +30,7 @@ from analyse_dolibarr_client.activity import (
 
 SEGMENTS = pd.DataFrame({
     "segment_id": ["industrial_laundry", "hotels_hospitality", "research_labs"],
-    "name_zh": ["工业洗衣房", "酒店与住宿业", "研究机构"],
+    "name_en": ["Industrial laundry services", "Hotels and hospitality", "Research institutes and laboratories"],
     "segment_priority": ["normal", "normal", "low"],
 })
 
@@ -204,7 +204,7 @@ def test_score_companies_end_to_end(tmp_path):
     })
     s = score_companies(model, companies, EMB, SEGMENTS)
     assert list(s["label"][:3]) == ["prospect", "other", "prospect"]
-    assert s.loc[0, "segment"] == "industrial_laundry" and s.loc[0, "segment_name_zh"] == "工业洗衣房"
+    assert s.loc[0, "segment"] == "industrial_laundry" and s.loc[0, "segment_name_en"] == "Industrial laundry services"
     assert s.loc[0, "fit"] > s.loc[1, "fit"]
     assert s.loc[0, "similar_training_companies"].startswith("industrial_laundry-")
     assert list(s["priority"]) == ["normal", "normal", "low", "unknown_size"]
@@ -316,11 +316,11 @@ def test_out_of_fold_uses_industries():
 
 def test_sales_label_and_category():
     model = _model()
-    segs = SEGMENTS.assign(category=["布草、纺织与工服", "布草、纺织与工服", "医疗与公共服务"])
+    segs = SEGMENTS.assign(category=["Linen, textiles and workwear", "Linen, textiles and workwear", "Healthcare and public services"])
     comp = pd.DataFrame({"description": [TEXTS["industrial_laundry"], TEXTS["other"], TEXTS["consulting"], TEMPLATE]})
     s = score_companies(model, comp, EMB, segs)
     assert list(s["sales_label"]) == ["prospect", "not_target", "not_target", "template_only"]
-    assert s.loc[0, "category"] == "布草、纺织与工服" and s.loc[1, "category"] is None
+    assert s.loc[0, "category"] == "Linen, textiles and workwear" and s.loc[1, "category"] is None
 
 
 def test_insufficient_info_is_folded_into_other():

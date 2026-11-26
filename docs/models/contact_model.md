@@ -1,118 +1,118 @@
-# 联系人（contact）模型：规划
+# Contact model: plan
 
-> 状态（2026-11-20）：规划中，尚未开始。HubSpot 里实际有哪些字段、覆盖率如何还没有确认，下面凡是依赖字段的地方都要在第 1 步探查后再定。
+> Status (2026-11-20): planning, not started. Which fields HubSpot actually has and their coverage are not yet confirmed; everything below that depends on fields must be settled after the probe in step 1.
 
-## 1. 要回答的问题
+## 1. The question
 
-**一家公司里，先联系谁？** 给定公司的一位联系人（职位、部门、级别），判断他 / 她是不是我们该找的人，以及适合谈哪条业务线。
+**Within a company, whom do we contact first?** Given a contact at a company (job title, department, level), decide whether they are the person we should reach, and which business line suits them.
 
-和公司模型的关系：
+Relation to the company model:
 
 ```
-公司优先级   = fit_overall × country_factor          （公司模型，见 company_lookalike.md）
-联系人分数   = contact_role_score                     （本模型）
-最终排序     = 公司优先级 × 联系人分数
+Company priority   = fit_overall × country_factor          (company model, see company_lookalike.md)
+Contact score      = contact_role_score                     (this model)
+Final ranking      = company priority × contact score
 ```
 
-公司模型回答「找哪家公司」，联系人模型回答「找这家公司的谁」。两者分开训练、分开评估。
+The company model answers "which company to target", the contact model answers "whom to target in that company". The two are trained and evaluated separately.
 
-web app 目前用大模型提示词判断人员匹配度（`backEnd/config/prompts/wf001_person_fit.yml`）。本模型上线后可以替代或校准它；在那之前，那个提示词的结果可以作为对照基线之一。
+The web app currently judges person fit with an LLM prompt (`backEnd/config/prompts/wf001_person_fit.yml`). Once this model is live it can replace or calibrate it; until then, that prompt's results can serve as one of the baselines.
 
-## 2. 数据来源：HubSpot（只读）
+## 2. Data source: HubSpot (read-only)
 
-web app 已有只读集成（见 `docs/data_sources.md` 第 4 节），可能用到的对象和字段：
+The web app already has a read-only integration (see `docs/data_sources.md` section 4). Objects and fields likely to be used:
 
-| 对象 | 字段（待探查确认） | 用途 |
+| Object | Fields (to be confirmed by probe) | Use |
 |---|---|---|
-| contacts | `jobtitle`、`lifecyclestage`、`hs_lead_status`、`notes_last_contacted`、`num_associated_deals`、`createdate`、退订 / 拒绝联系相关字段 | 特征（职位）、标签（阶段、状态）、排除（退订） |
-| deals | `dealstage`、`closedate`、`amount`、产品线相关字段（如果有） | 标签：哪些联系人参与了成交的交易 |
-| companies | `domain`、`name` | 把联系人连到公司模型的样本单元 |
-| 关联 | contact ↔ company、contact ↔ deal | 同上 |
-| 来源 | 记录是不是 web app 写入的、来自哪个活动（lemlist 等） | 识别选择偏差（第 6 节） |
+| contacts | `jobtitle`, `lifecyclestage`, `hs_lead_status`, `notes_last_contacted`, `num_associated_deals`, `createdate`, unsubscribe / do-not-contact fields | Features (job title), labels (stage, status), exclusion (unsubscribed) |
+| deals | `dealstage`, `closedate`, `amount`, product-line fields (if any) | Labels: which contacts took part in won deals |
+| companies | `domain`, `name` | Link contacts to the company model's sample units |
+| Associations | contact ↔ company, contact ↔ deal | Same as above |
+| Source | Whether the record was written by the web app, which campaign it came from (lemlist, etc.) | Identify selection bias (section 6) |
 
-### 第 1 步：字段探查
+### Step 1: field probe
 
-用 web app 的只读工具 `field_probe.py` 拉一份字段报告：字段名、枚举值、填充数量，**不含任何个人记录**。据此确定：
+Use the web app's read-only tool `field_probe.py` to pull a field report: field names, enum values, fill counts, **no personal records**. From it, determine:
 
-- `jobtitle` 的填充率（低于约 50% 时，需要从 LinkedIn 个人页或 web app 已抓的人员数据补）；
-- `lifecyclestage` / `hs_lead_status` 实际用了哪些值，各有多少；
-- 交易是否能对应到业务线（定位 / RFID / Ubi Cloud）；
-- 有多少联系人关联了成交的交易；
-- 退订、拒绝联系相关字段的名称。
+- the fill rate of `jobtitle` (below about 50%, it needs to be supplemented from LinkedIn profiles or the people data the web app already scraped);
+- which values of `lifecyclestage` / `hs_lead_status` are actually used, and how many of each;
+- whether deals can be mapped to business lines (geolocation / RFID / Ubi Cloud);
+- how many contacts are associated with won deals;
+- the names of the unsubscribe and do-not-contact fields.
 
-## 3. 标签（探查后确定，以下为初步方案）
+## 3. Labels (to be settled after the probe; preliminary proposal below)
 
-| 标签 | 定义（初步） | 说明 |
+| Label | Definition (preliminary) | Notes |
 |---|---|---|
-| 正样本：成交相关 | 关联了已成交交易的联系人 | 最可靠，但数量可能少 |
-| 正样本：有进展 | 进入「商机」或更后的阶段、约到会议、有回复 | 数量多一些，噪音也大一些 |
-| 负样本：明确不相关 | 销售标记为不合适 / 错误的人 / 无权限 | 真正的负样本，需要看 `hs_lead_status` 是否有这样的值 |
-| 未标注 | 联系过但没有结果，或从没联系过 | 和公司模型一样，不能直接当负样本 |
+| Positive: deal-related | Contacts associated with a won deal | Most reliable, but possibly few |
+| Positive: progressed | Reached the "opportunity" stage or later, meeting booked, replied | More of them, but noisier |
+| Negative: clearly not relevant | Marked by sales as not a fit / wrong person / no authority | True negatives; depends on whether `hs_lead_status` has such values |
+| Unlabelled | Contacted with no outcome, or never contacted | As with the company model, cannot be used directly as negatives |
 
-业务线维度：如果交易能对应业务线，就像公司模型一样加一个分配模型（谁买定位、谁买 RFID、谁买 Ubi Cloud）。
+Business-line dimension: if deals can be mapped to business lines, add an allocation model as in the company model (who buys geolocation, who buys RFID, who buys Ubi Cloud).
 
-## 4. 特征
+## 4. Features
 
-| 可以用 | 处理 |
+| Allowed | Processing |
 |---|---|
-| 职位（`jobtitle`，以及 LinkedIn 个人页的 headline，如果有） | 多语言向量（与公司模型同一套技术）；规范化后提取级别（高管 / 总监 / 经理 / 执行）和职能（运营、物流、IT、采购、质量、财务…） |
-| 部门 / 职能 | 类别 |
-| 所在公司的模型输出 | `fit_overall`、`p_*`、公司规模 —— 作为上下文，不重复训练 |
+| Job title (`jobtitle`, plus the LinkedIn profile headline if available) | Multilingual embeddings (same technology as the company model); after normalisation, extract level (executive / director / manager / staff) and function (operations, logistics, IT, purchasing, quality, finance…) |
+| Department / function | Categorical |
+| Model output for the contact's company | `fit_overall`, `p_*`, company size — as context, not retrained |
 
-| 禁止 | 原因 |
+| Forbidden | Reason |
 |---|---|
-| 姓名、性别（包括从姓名或照片推断）、年龄、国籍 / 民族、照片 | 与工作角色无关；涉及歧视和 GDPR 风险 |
-| 邮箱地址、电话、个人社交活动、学校 | 不需要；增加个人数据处理范围 |
-| HubSpot 负责人（owner）、销售跟进次数 | 反映的是销售行为而不是这个人本身，会造成泄漏 |
-| 国家、城市 | 和公司模型同理，只用于加权和评估 |
+| Name, gender (including inferred from name or photo), age, nationality / ethnicity, photo | Unrelated to the work role; discrimination and GDPR risk |
+| Email address, phone, personal social activity, school | Not needed; widens the scope of personal data processing |
+| HubSpot owner, number of sales follow-ups | Reflect sales behaviour rather than the person, causing leakage |
+| Country, city | As in the company model, used only for weighting and evaluation |
 
-## 5. 模型与验证
+## 5. Model and validation
 
-- 结构：与公司模型相同的技术栈（多语言向量 + 逻辑回归，JSON + npz 模型文件，不用 pickle）。
-- 对照基线：
-  1. 关键词规则（例如职位含 logistique / supply chain / opérations / directeur 等就加分）；
-  2. web app 现有的大模型人员匹配度。
+- Structure: same tech stack as the company model (multilingual embeddings + logistic regression, JSON + npz model files, no pickle).
+- Baselines:
+  1. Keyword rules (e.g. add points if the job title contains logistique / supply chain / opérations / directeur, etc.);
+  2. The web app's existing LLM person fit.
 
-  模型必须胜过这两个基线才上线。
-- 切分：按公司分组（同一公司的联系人在同一折），加按时间验证（用较早创建的联系人训练，看之后的联系人）。
-- 指标：AUC、平均精度、每家公司里排第一的人是否正确（在有多个联系人的公司上）。
+  The model must beat both baselines to go live.
+- Split: grouped by company (contacts of the same company in the same fold), plus time-based validation (train on earlier-created contacts, test on later ones).
+- Metrics: AUC, average precision, whether the top-ranked person in each company is correct (on companies with several contacts).
 
-## 6. 主要风险：选择偏差
+## 6. Main risk: selection bias
 
-HubSpot 里的联系人不是随机样本：
+Contacts in HubSpot are not a random sample:
 
-- 有一部分是 web app 自己筛选后写入的（web app 会往 HubSpot 新建联系人和公司），模型可能只是学会了「web app 以前喜欢谁」；
-- 销售只联系了自己认为合适的人，从没被联系过的职位类型没有任何标签；
-- 早创建的联系人有更长时间转化。
+- some were written after the web app's own filtering (the web app creates contacts and companies in HubSpot), so the model may merely learn "whom the web app used to like";
+- sales contacted only people they considered suitable, so job-title types never contacted have no labels at all;
+- earlier-created contacts have had longer to convert.
 
-处理方式：记录每个联系人的来源，评估时按来源分组报告；标签只在「被联系过」的人里比较；按时间验证。
+Mitigation: record each contact's source and report evaluation grouped by source; compare labels only among people who "were contacted"; validate over time.
 
-## 7. 个人数据与合规（开始前必须完成）
+## 7. Personal data and compliance (must be done before starting)
 
-联系人是个人数据，适用 GDPR，比公司数据敏感得多。以下要点需要和法务 / DPO 确认，本文不构成法律意见：
+Contacts are personal data subject to GDPR, much more sensitive than company data. The points below must be confirmed with legal / the DPO; this document is not legal advice:
 
-- **法律依据**：B2B 开发通常依据「正当利益」，需要书面的正当利益评估；对联系人做画像打分要在隐私声明里说明。
-- **是否需要 DPIA**（数据保护影响评估）：大规模画像时通常建议做。
-- **反对和退订**：已退订或反对的联系人不进训练，也不打分。
-- **非完全自动决策**：分数只给销售参考，由人决定是否联系（不构成 GDPR 第 22 条意义上的完全自动化决策）。
-- **数据最小化**：训练数据只保留假名化 ID（加盐哈希）、职位、派生的级别 / 职能和标签；不导出姓名、邮箱、电话。ID 与真人的对应只留在 HubSpot 里。
-- **存放与保留**：训练数据只放本机 `data/`（加密磁盘），不进 git；设定保留期限，到期删除训练导出；模型文件里不包含任何个人数据（不像公司模型那样保存最近邻索引，或只保存职位向量而不保存身份）。
-- **访问**：HubSpot token 只读权限、运行时读取；导出脚本只拉需要的字段。
+- **Legal basis**: B2B prospecting usually relies on "legitimate interest", which requires a written legitimate interest assessment; profiling and scoring contacts must be disclosed in the privacy notice.
+- **Whether a DPIA is needed** (data protection impact assessment): usually recommended for large-scale profiling.
+- **Objection and unsubscribe**: contacts who unsubscribed or objected are excluded from training and are not scored.
+- **Not solely automated decisions**: scores are only a reference for sales; a person decides whether to make contact (not a solely automated decision within the meaning of GDPR Article 22).
+- **Data minimisation**: training data keeps only a pseudonymised ID (salted hash), job title, derived level / function and labels; names, emails and phones are not exported. The mapping between ID and real person stays only in HubSpot.
+- **Storage and retention**: training data lives only in local `data/` (encrypted disk), never in git; set a retention period and delete training exports when it expires; model files contain no personal data (unlike the company model, no nearest-neighbour index is stored, or only job-title embeddings are stored without identities).
+- **Access**: HubSpot token with read-only permissions, read at runtime; export scripts pull only the fields needed.
 
-## 8. 步骤
+## 8. Steps
 
-1. 和法务 / DPO 确认第 7 节，记录结论。
-2. 运行字段探查，写一份字段报告（只有字段名和数量）。
-3. 根据探查结果定标签和样本量；样本太少时（例如成交相关的联系人少于约 200 个）先用规则 + 大模型，积累数据。
-4. 写只读导出模块：假名化、只取白名单字段，存到 `data/`。
-5. 职位规范化和级别 / 职能分类，与关键词基线对比。
-6. 训练和验证（第 5 节），写报告。
-7. 打分接入 web app，与公司模型共用反馈回流（记录联系结果）。
+1. Confirm section 7 with legal / the DPO and record the conclusions.
+2. Run the field probe and write a field report (field names and counts only).
+3. Settle labels and sample size from the probe results; if samples are too few (e.g. fewer than about 200 deal-related contacts), use rules + LLM first while accumulating data.
+4. Write a read-only export module: pseudonymised, allowlisted fields only, stored in `data/`.
+5. Job-title normalisation and level / function classification, compared with the keyword baseline.
+6. Training and validation (section 5), write a report.
+7. Integrate scoring into the web app, sharing the feedback loop with the company model (recording contact outcomes).
 
-## 9. 待决定
+## 9. To decide
 
-- [ ] 法律依据、DPIA、保留期限（法务 / DPO）
-- [ ] HubSpot 字段探查结果
-- [ ] 标签的具体定义（第 3 节）
-- [ ] 职位数据不足时，是否用 web app 已抓的 LinkedIn 人员数据补
-- [ ] 联系人模型是否也分业务线
+- [ ] Legal basis, DPIA, retention period (legal / DPO)
+- [ ] HubSpot field probe results
+- [ ] Exact label definitions (section 3)
+- [ ] Whether to supplement job-title data with the LinkedIn people data the web app already scraped, if insufficient
+- [ ] Whether the contact model is also split by business line

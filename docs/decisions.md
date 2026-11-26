@@ -1,68 +1,68 @@
-# 决策记录
+# Decision log
 
-按时间顺序记录影响数据、标签和模型的决定。新决定加在对应日期下；推翻旧决定时不删除原条目，在原条目后注明「已被 YYYY-MM-DD 的决定取代」。
+Decisions that affect data, labels and models, in chronological order. Add new decisions under the corresponding date; when overturning an earlier decision, do not delete the original entry, but add after it "Superseded by the decision of YYYY-MM-DD".
 
-## 2026-11-18 / 19：客户名单
+## 2026-11-18 / 19: Customer list
 
-| 决定 | 原因 |
+| Decision | Reason |
 |---|---|
-| 原始快照 `data/raw/` 只读；所有输出放 `data/` 下；`data/`、`.env`、密钥不进 git | 客户数据和凭证安全 |
-| 禁止用 `CUSTOMER_ID = THIRD_PARTY_ID` 连接 | `CUSTOMER_ID` 是哈希，部分还归并了多个第三方 |
-| 这一轮不给客户打 ICP 分，疑似集成商只标记不删除 | 打分交给后续模型；删除不可逆 |
-| 允许**只读**调用 Dolibarr REST API（用户批准） | 名称匹配留下约 300 个客户对不上；订单的 socid 是唯一可靠的键 |
-| API 的 socid 只有在订单 id 和编号都一致时才采用 | API 实例与数据仓库从 ORDER_ID ≈ 9704 起不一致 |
-| 开给集团内部公司的订单从客户金额中扣除；全部开给内部公司的客户排除 | 内部交易不是对外销售 |
-| `lookup_name` 优先用开票的档案名；与订单名无关时加 `lookup_name_conflict` 标记，两个都搜 | 订单名有时是归并出来的标签 |
-| 网站和邮箱只保存**域名**，不保存完整邮箱或人名 | 数据最小化 |
+| The raw snapshot `data/raw/` is read-only; all outputs go under `data/`; `data/`, `.env` and secrets never go into git | Security of customer data and credentials |
+| Joining on `CUSTOMER_ID = THIRD_PARTY_ID` is forbidden | `CUSTOMER_ID` is a hash, and some of them merge several third parties |
+| No ICP score for customers in this round; suspected integrators are only flagged, not removed | Scoring is left to the later model; removal is irreversible |
+| **Read-only** calls to the Dolibarr REST API are allowed (approved by the user) | Name matching left about 300 customers unmatched; the order socid is the only reliable key |
+| The API socid is used only when both the order id and the order number match | The API instance and the data warehouse diverge from ORDER_ID ≈ 9704 |
+| Orders invoiced to group intercompany entities are deducted from the customer amount; customers invoiced only to intercompany entities are excluded | Internal transactions are not external sales |
+| `lookup_name` prefers the invoiced third-party record name; when it is unrelated to the order name, add the `lookup_name_conflict` flag and search both | The order name is sometimes a merged label |
+| Websites and emails are stored as **domains** only, never full email addresses or personal names | Data minimisation |
 
-## 2026-11-20：公司 lookalike 模型
+## 2026-11-20: Company lookalike model
 
-| 决定 | 原因 | 决定者 |
+| Decision | Reason | Decided by |
 |---|---|---|
-| 模型目标选 A：只看 LinkedIn 信息，判断像不像我们的终端客户（PU 学习，潜在客户是未标注样本） | 可用样本最多，标签几乎不用人工标，直接用于给潜在客户排序 | 用户 |
-| 样本单元 = 一个网站域名（集团），按集团切分训练 / 测试 | LinkedIn 上子公司常共用集团主页，避免泄漏 | 用户确认 |
-| **国家不作为特征**；未标注样本按国家重新加权 | 正样本 81% 在法国，否则模型学成「是不是法国公司」 | 用户 |
-| 国家对成交的影响用模型外的**国家系数**表达（历史成交率起步，可人工覆盖） | 国家确实影响成交，但历史数据分不清「难卖」和「没去卖」；策略调整不用重新训练 | 用户确认 |
-| 业务线按 Dolibarr **产品标签**（`GPSBLE` 等）判断，没有标签的按名称规则补 | 用户确认 BLE 在 Dolibarr 里用标签分类；`ITEM_CATEGORY` 分不开 | 用户 |
-| 业务范围：硬件（géolocalisation、traçabilité）+ 软件（Connected Things、Ubi Cloud）；**Connected Things 与 géolocalisation 是同一条线**；web app 不再按产品目录分类 | 产品目录是市场部的营销包装 | 用户 |
-| 模型结构：**总模型 + 业务线分配模型**（取代「每条线一个 PU 模型」） | 定位、Ubi Cloud 正样本太少；Ubi Cloud 几乎都是硬件客户的加购 | 用户 |
-| **公司简介是主特征**，LinkedIn 行业只作辅助；NAF / NAICS 不进模型 | 行业字段常不准或太宽；官方代码只有部分国家有，会成为国家代理变量 | 用户 |
-| 先抓 LinkedIn 再做行业分组 | 行业分组以后用于展示和评估，不阻塞训练 | 用户 |
-| 抓取清单不含客户标签；按国家分层抽样未标注样本 | 匹配不能因标签而不同；抽样后权重接近均匀，少抓页面 | 用户确认 |
-| 试点后收紧匹配：主域名一致优先；无域名时名称完全相同 + 国家一致；其余进人工队列；国家为空不自动匹配 | 试点 13 个「matched」里 7 个错或存疑 | 用户确认 |
-| 抓取不设费用上限 | 实测单价很低（约 $0.0012 / 条） | 用户 |
-| 技术：fastembed + 多语言 e5、scikit-learn 逻辑回归、模型文件 JSON + npz（不用 pickle）；向量模型大小按真实数据比较后选 | 本机运行、可复现；web app 后端没有机器学习库；服务器内存有限 | 用户确认 |
-| 训练模块在单独的 worktree / 分支 `lookalike-training` 开发 | 抓取 agent 同时在 `lookalike-labeling` 上改代码和依赖 | 用户确认 |
-| 后续要用 HubSpot 联系人数据训练联系人模型；先规划、先做合规确认 | 见 `docs/models/contact_model.md` | 用户 |
+| Model target A: using only LinkedIn information, judge whether a company looks like our end customers (PU learning, prospects are the unlabeled samples) | Most usable samples, labels need almost no manual labelling, directly usable to rank prospects | User |
+| Sample unit = one website domain (group); train / test split by group | On LinkedIn, subsidiaries often share the group page; avoids leakage | Confirmed by user |
+| **Country is not a feature**; unlabeled samples are reweighted by country | 81% of positives are in France; otherwise the model learns "is this a French company" | User |
+| The effect of country on closing deals is expressed outside the model by a **country factor** (starting from the historical conversion rate, can be overridden manually) | Country does affect closing, but historical data cannot separate "hard to sell" from "never tried to sell"; strategy changes need no retraining | Confirmed by user |
+| Business lines are determined by Dolibarr **product tags** (`GPSBLE` etc.); untagged products are filled in by name rules | The user confirmed BLE is classified with tags in Dolibarr; `ITEM_CATEGORY` cannot separate them | User |
+| Business scope: hardware (géolocalisation, traçabilité) + software (Connected Things, Ubi Cloud); **Connected Things and géolocalisation are the same line**; the web app no longer classifies by product catalogue | The product catalogue is marketing packaging | User |
+| Model structure: **overall model + business-line allocation model** (replaces "one PU model per line") | Too few positives for geolocation and Ubi Cloud; Ubi Cloud is almost always an add-on purchase by hardware customers | User |
+| **The company description is the main feature**, LinkedIn industry is only auxiliary; NAF / NAICS do not go into the model | The industry field is often inaccurate or too broad; official codes exist only for some countries and would become a country proxy | User |
+| Scrape LinkedIn first, then build industry groupings | Industry groupings are for display and evaluation later and do not block training | User |
+| The scrape list contains no customer labels; unlabeled samples are sampled stratified by country | Matching must not differ by label; after sampling the weights are close to uniform and fewer pages need scraping | Confirmed by user |
+| Matching tightened after the pilot: matching main domain takes precedence; without a domain, identical name + same country; everything else goes to the manual queue; no automatic match when country is empty | Of the 13 "matched" in the pilot, 7 were wrong or doubtful | Confirmed by user |
+| No cost cap on scraping | The measured unit price is very low (about $0.0012 / item) | User |
+| Technology: fastembed + multilingual e5, scikit-learn logistic regression, model files as JSON + npz (no pickle); embedding model size chosen after comparison on real data | Runs locally, reproducible; the web app backend has no machine-learning libraries; server memory is limited | Confirmed by user |
+| The training module is developed in a separate worktree / branch `lookalike-training` | The scraping agent is changing code and dependencies on `lookalike-labeling` at the same time | Confirmed by user |
+| A contact model will later be trained on HubSpot contact data; plan first and confirm compliance first | See `docs/models/contact_model.md` | User |
 
-## 2026-11-24：公司业务打分
+## 2026-11-24: Company activity scoring
 
-| 决定 | 原因 | 决定者 |
+| Decision | Reason | Decided by |
 |---|---|---|
-| 细分清单 v2：37 个细分（`docs/segments/segments_v2.csv`） | 草稿加上客户数据里找到的 13 个，覆盖 90% 客户 | 用户 |
-| 打分分两部分：**匹配度**和**优先级**。员工少于 51 人或研究机构 = 低优先级，从不排除 | 小公司、研究机构也合适，但销售有更值得先联系的公司 | 用户 |
-| 有成交单的公司都算客户，不再追问是否转售 | 用户：都有成交单，无所谓 | 用户 |
-| 训练标签用三个模型投票，只用三票一致的行 | 审核集上三票一致与独立的强模型组 100% 一致，2 比 1 只有 54% | 用户确认 |
-| 弱细分按关键词补标 486 家 | 7 个细分样本少于 15 个，召回率 0–50% | 用户 |
-| 模型：e5 向量 + 逻辑回归（44 类），解释用「最相似的 3 家已标注公司」 | 比 TF-IDF 好（AUC 0.97 对 0.93，细分准确率 0.79 对 0.57）；零样本不可用。向量模型同样会学到文本语言，所以后来加了按语言加权（见下） | 用户确认 |
-| 规模优先用 LinkedIn 声明的人数段；只有关联成员数时，≥51 记为 normal，<51 记为 `unknown_size` | 成员数只是下限：108 家潜在客户只有成员数（中位数 3），旧规则把其中 105 家误判为 low | 用户确认（2026-11-25） |
-| 声明人数段 <51 但成员数 ≥51 → normal | 成员数是下限，说明声明已过时，有 19 家潜在客户是这种情况 | 用户（2026-11-25） |
-| 模板简介只保留 LinkedIn 行业，不用公司名；label 记为 `template_only`，候选细分由行业映射表给出，并且不进训练 | 公司名同样是国家代理变量（COMMUNE DE、SARL）；只看行业的文本太少，模型给不出可靠的细分 | 用户（2026-11-25） |
-| 训练过的公司打分时用 out-of-fold 分数 | 否则分数基本是在复述训练标签，排在表最前面 | 用户（2026-11-25） |
-| 加入 LinkedIn 行业 one-hot 特征（带去掉行业的副本），prospect 门槛从 0.5 调到 0.7 | 改进分析：8 类准确率 0.82 → 0.86，other 召回率 0.40 → 0.64，细分准确率 0.80 → 0.85。置信度权重、软标签、两段式、kNN、MLP 都没有帮助 | 用户（2026-11-25） |
-| other 拆成 5 个子标签（第二次三模型投票），insufficient_info 并入 other；门槛改为 0.65，让 prospect 召回率保持在约 0.95 | other 被误判为 prospect 的比例：交叉验证 19.8% → 14.5%，审核集 31% → 15% | 用户（2026-11-25） |
-| 给销售的输出合并成四类（prospect / competitor / template_only / not_target），增加细分大类 `category`；训练时保留全部细类 | 训练时合并会让精确率从 0.94 降到 0.89；对销售来说，四类的准确率是 0.91，8 类只有 0.87 | 用户（2026-11-25） |
-| 模板简介（based out of 地址 / 国家）在生成向量前截掉，并标为信息不足 | 地址和国家是国家代理变量；审查发现 219 家潜在客户是这种简介 | 用户确认修复 |
-| 训练按语言加权，让每种语言的 prospect 比例相同 | 法语简介的 fit 系统性偏高（非 prospect 高 0.095），违反国家不参与打分 | 用户确认修复 |
-| label = prospect 当且仅当 fit ≥ 0.5；研究机构的低优先级只用于 prospect | 评估和上线用同一条规则；IBM、Wavestone 这类非 prospect 不再因为细分被降级 | 用户确认修复 |
-| 客户的主页和简介不进训练；打分表标出与客户同主页的公司 | 审查发现 8 条训练行、10 家潜在客户和客户共用主页 | 用户确认修复 |
+| Segment list v2: 37 segments (`docs/segments/segments_v2.csv`) | The draft plus 13 found in customer data, covering 90% of customers | User |
+| Scoring has two parts: **fit** and **priority**. Fewer than 51 employees or a research institution = low priority, never excluded | Small companies and research institutions are also suitable, but sales has companies more worth contacting first | User |
+| Every company with a closed order counts as a customer; no further question about whether it resells | User: they all have closed orders, it doesn't matter | User |
+| Training labels come from a vote of three models; only unanimous (3 of 3 votes) rows are used | On the audit set, unanimous rows agree 100% with an independent group of strong models, 2-1 splits only 54% | Confirmed by user |
+| Weak segments topped up with 486 keyword-labelled companies | 7 segments have fewer than 15 samples, recall 0–50% | User |
+| Model: e5 embeddings + logistic regression (44 classes); explanation via "the 3 most similar labelled companies" | Better than TF-IDF (AUC 0.97 vs 0.93, segment accuracy 0.79 vs 0.57); zero-shot is unusable. The embedding model also learns the text language, so per-language weighting was added later (see below) | Confirmed by user |
+| Size uses the LinkedIn declared employee range first; when only the associated LinkedIn members count is available, ≥51 counts as normal and <51 as `unknown_size` | The members count is only a lower bound: 108 prospects have only a members count (median 3), and the old rule misclassified 105 of them as low | Confirmed by user (2026-11-25) |
+| Declared employee range <51 but LinkedIn members ≥51 → normal | The members count is a lower bound, so the declaration is outdated; 19 prospects are in this case | User (2026-11-25) |
+| Template descriptions keep only the LinkedIn industry, not the company name; label recorded as `template_only`, candidate segments come from the industry mapping table, and they are excluded from training | The company name is also a country proxy (COMMUNE DE, SARL); industry-only text is too short for the model to give a reliable segment | User (2026-11-25) |
+| Companies used in training are scored with out-of-fold scores | Otherwise the scores mostly repeat the training labels and sit at the top of the table | User (2026-11-25) |
+| Added LinkedIn industry one-hot features (with an industry-free copy); prospect threshold raised from 0.5 to 0.7 | Improvement analysis: 8-class accuracy 0.82 → 0.86, other recall 0.40 → 0.64, segment accuracy 0.80 → 0.85. Confidence weights, soft labels, two-stage, kNN and MLP did not help | User (2026-11-25) |
+| other split into 5 sub-labels (second three-model vote), insufficient_info merged into other; threshold changed to 0.65 to keep prospect recall at about 0.95 | Share of other misclassified as prospect: cross-validation 19.8% → 14.5%, audit set 31% → 15% | User (2026-11-25) |
+| The output for sales is merged into four classes (prospect / competitor / template_only / not_target), with an added segment family `category`; training keeps all fine-grained classes | Merging during training would drop precision from 0.94 to 0.89; for sales, four-class accuracy is 0.91 vs only 0.87 for 8 classes | User (2026-11-25) |
+| Template descriptions (based out of address / country) are cut before embedding and marked as insufficient information | Address and country are country proxies; the review found 219 prospects with such descriptions | User confirmed the fix |
+| Training is weighted by language so that every language has the same prospect share | French descriptions had systematically higher fit (0.095 higher for non-prospects), violating the rule that country plays no role in scoring | User confirmed the fix |
+| label = prospect if and only if fit ≥ 0.5; the low priority for research institutions applies only to prospects | Evaluation and production use the same rule; non-prospects such as IBM and Wavestone are no longer downgraded because of their segment | User confirmed the fix |
+| Customer pages and descriptions are excluded from training; the scoring table flags companies sharing a page with a customer | The review found 8 training rows and 10 prospects sharing a page with a customer | User confirmed the fix |
 
-## 待决定
+## Pending decisions
 
-| 事项 | 影响 |
+| Item | Impact |
 |---|---|
-| web app 生产环境部署在哪里（云 / 本地或办公室机器） | 模型接入方案、是否需要常开机器 |
-| 哪个 Dolibarr 实例是生产环境（需 IT 确认） | 2026 年 9 月以后订单的 socid |
-| 联系人模型的法律依据、DPIA、保留期限（法务 / DPO） | 联系人模型能否开始 |
-| 是否定义给销售看的行业分组（NACE / NAICS / LinkedIn 行业映射） | web app 的筛选和按行业评估 |
-| `fit` 的硬阈值（按销售可接受的误报率定） | 是否给销售只显示 prospect |
+| Where the web app is deployed in production (cloud / on-premises or office machine) | Model integration approach, whether an always-on machine is needed |
+| Which Dolibarr instance is production (needs IT confirmation) | socid for orders after September 2026 |
+| Legal basis, DPIA and retention period for the contact model (legal / DPO) | Whether the contact model can start |
+| Whether to define industry groupings for sales (NACE / NAICS / LinkedIn industry mapping) | Web app filters and evaluation by industry |
+| Hard threshold for `fit` (set by the false-positive rate sales can accept) | Whether to show sales only prospects |

@@ -643,7 +643,7 @@ def attach_web_hints(cust: pd.DataFrame, web: pd.DataFrame | None, tp: pd.DataFr
         out.at[i, "web_domain_alternatives"] = _join(dict.fromkeys(d for d, _, _ in found if d != dom)) or None
 
     shared = out["web_domain"].map(out["web_domain"].value_counts())
-    note = "域名与其他客户共用"
+    note = "domain shared with other customers"
     out["notes"] = [
         _join([n, note]) if isinstance(d, str) and s > 1 else n
         for n, d, s in zip(out["notes"], out["web_domain"], shared)
@@ -738,31 +738,31 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
 
         notes = name_notes(name)
         if reasons:
-            notes.append("疑似集成商/同行")
+            notes.append("suspected integrator/peer")
         if evidence:
-            notes.append("也是供应商")
+            notes.append("also a supplier")
         if not m["amount_ht_eur"]:
-            notes.append("有效订单金额为0")
+            notes.append("valid order amount is 0")
         if tp_row is not None and not tp_row["IS_CLIENT"]:
-            notes.append("档案IS_CLIENT=false")
+            notes.append("third-party record IS_CLIENT=false")
         tp_country = pick("COUNTRY_CODE")
         if tp_country and order_iso and tp_country != order_iso:
-            notes.append(f"档案国家{tp_country}≠订单国家{order_iso}")
+            notes.append(f"third-party record country {tp_country} ≠ order country {order_iso}")
         if pd.notna(m.get("n_invoices_flagged_intercompany")) and m["n_invoices_flagged_intercompany"] > 0:
-            notes.append("发票含内部公司标记")
+            notes.append("invoices flagged intercompany")
         history_truncated = bool(entities) and entities <= LATE_HISTORY_ENTITIES
         if history_truncated:
-            notes.append("订单历史可能不全(仅Page Up/Ubi Smart/Ubi Impact)")
+            notes.append("order history may be incomplete (Page Up/Ubi Smart/Ubi Impact only)")
         if res.status == MATCH_NORMALIZED:
-            notes.append(f"规范化匹配({res.rule})")
+            notes.append(f"normalised match ({res.rule})")
         if erp is not None and len(erp.ids) > 1:
-            notes.append(f"订单分属{len(erp.ids)}个第三方")
+            notes.append(f"orders split across {len(erp.ids)} third-party records")
         if cid in interco_excluded.index:
-            notes.append("已扣除开给内部公司的订单")
+            notes.append("orders billed to intercompany entities deducted")
         if name_vs_erp == "different":
-            notes.append("名称匹配与ERP不一致")
+            notes.append("name match disagrees with ERP")
         if res.status == MATCH_AMBIGUOUS:
-            notes.append(f"一对多({len(res.chosen_ids)})")
+            notes.append(f"one-to-many ({len(res.chosen_ids)})")
 
         # The order mart's CUSTOMER_NAME is sometimes a merged label ("S Transport",
         # "TCS - GROUPE STERNE"); when the ERP says which third party was billed, search by
@@ -778,7 +778,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
         # web app should search both lookup_name and order_lookup_name.
         lname_conflict = lname_source == "third_party_name" and names_unrelated(order_lname, lname)
         if lname_conflict:
-            notes.append("订单名与档案名不同(两个都搜)")
+            notes.append("order name differs from third-party record name (search both)")
         town = pick("TOWN")
         siren, siret = pick("SIREN"), pick("SIRET")
         reg_id = (
@@ -844,7 +844,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "ambiguous_match",
                     "third_party_ids": _join(res.chosen_ids),
-                    "detail": ("[候选注册号一致，档案重复录入] " if same_id else "")
+                    "detail": ("[candidates share the registration number, duplicate third-party records] " if same_id else "")
                     + "; ".join(
                         f"{r.THIRD_PARTY_ID}:{r.THIRD_PARTY_NAME} [entity={r.entity_name}, "
                         f"client={r.IS_CLIENT}, siren={r.SIREN}, town={r.TOWN}]"
@@ -858,7 +858,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                     | {
                         "issue_type": "siren_conflict_candidates",
                         "third_party_ids": _join(res.chosen_ids),
-                        "detail": "同名档案的公司注册号不同: " + ", ".join(ids),
+                        "detail": "same-name third-party records have different registration numbers: " + ", ".join(ids),
                     }
                 )
         if erp is not None and len(erp.ids) > 1:
@@ -867,10 +867,10 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "erp_multiple_third_parties",
                     "third_party_ids": _join(erp.ids),
-                    "detail": f"订单开在 {len(erp.ids)} 个第三方上，主名单取金额最大的非内部公司: "
+                    "detail": f"orders are on {len(erp.ids)} third-party records; the master list takes the largest-amount non-intercompany one: "
                     + "; ".join(
                         f"{i}:{tp.at[i, 'THIRD_PARTY_NAME']} ({a:,.2f}€"
-                        + (", 内部公司" if tp.at[i, "IS_INTERCOMPANY"] else "")
+                        + (", intercompany entity" if tp.at[i, "IS_INTERCOMPANY"] else "")
                         + ")"
                         for i, a in zip(erp.ids, erp.amounts)
                     ),
@@ -882,8 +882,8 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "erp_includes_intercompany",
                     "third_party_ids": _join(i for i in erp.ids if tp.at[i, "IS_INTERCOMPANY"]),
-                    "detail": f"{int(interco_orders_n.get(cid, 0))} 张订单开给了内部公司，"
-                    f"已从金额中扣除 {interco_excluded.get(cid, 0.0):,.2f}€；客户保留在主名单",
+                    "detail": f"{int(interco_orders_n.get(cid, 0))} orders billed to intercompany entities, "
+                    f"{interco_excluded.get(cid, 0.0):,.2f}€ deducted from the amount; customer kept in the master list",
                 }
             )
         if name_vs_erp == "different":
@@ -892,8 +892,8 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "name_match_differs_from_erp",
                     "third_party_ids": f"{name_res.third_party_id}->{erp.ids[0]}",
-                    "detail": f"名称匹配到 {name_res.third_party_id}:{tp.at[name_res.third_party_id, 'THIRD_PARTY_NAME']}，"
-                    f"ERP 订单实际开在 {erp.ids[0]}:{tp.at[erp.ids[0], 'THIRD_PARTY_NAME']}；采用 ERP",
+                    "detail": f"name matched {name_res.third_party_id}:{tp.at[name_res.third_party_id, 'THIRD_PARTY_NAME']}, "
+                    f"but ERP orders are actually on {erp.ids[0]}:{tp.at[erp.ids[0], 'THIRD_PARTY_NAME']}; using ERP",
                 }
             )
         if res.is_intercompany:
@@ -902,17 +902,17 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "intercompany_customer",
                     "third_party_ids": _join(res.candidate_ids),
-                    "detail": "订单客户对上内部公司(IS_INTERCOMPANY)，已从主名单排除",
+                    "detail": "order customer matches an intercompany entity (IS_INTERCOMPANY), excluded from the master list",
                 }
             )
-        if not res.is_intercompany and "发票含内部公司标记" in notes:
+        if not res.is_intercompany and "invoices flagged intercompany" in notes:
             issues.append(
                 base
                 | {
                     "issue_type": "invoice_intercompany_flag",
                     "third_party_ids": _join(res.chosen_ids),
                     "detail": f"{int(m['n_invoices_flagged_intercompany'])}/{int(m['n_invoices'])} "
-                    "张有效发票 IS_INTERCOMPANY=true；名称未对上内部公司，保留在主名单",
+                    "valid invoices have IS_INTERCOMPANY=true; name does not match an intercompany entity, kept in the master list",
                 }
             )
         if not isinstance(name, str) or not name.strip():
@@ -921,7 +921,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "no_customer_name",
                     "third_party_ids": "",
-                    "detail": "订单上 CUSTOMER_NAME 为空，无法按名称匹配" + ("；已由 ERP socid 补上" if erp is not None else ""),
+                    "detail": "CUSTOMER_NAME is empty on the order, cannot match by name" + ("; filled in from ERP socid" if erp is not None else ""),
                 }
             )
         if tp_row is not None and not tp_row["IS_CLIENT"]:
@@ -930,7 +930,7 @@ def build(snap: Snapshot, snapshot_date: date) -> BuildResult:
                 | {
                     "issue_type": "matched_registry_not_client",
                     "third_party_ids": res.third_party_id,
-                    "detail": "唯一匹配的档案 IS_CLIENT=false",
+                    "detail": "the only matching third-party record has IS_CLIENT=false",
                 }
             )
 
@@ -983,7 +983,7 @@ def registry_siren_issues(cust: pd.DataFrame, tp: pd.DataFrame) -> list[dict]:
                         "customer_name": r.customer_name,
                         "amount_ht_eur": r.amount_ht_eur,
                         "third_party_ids": r.third_party_ids,
-                        "detail": f"注册号 {reg_id} 对应多个不同名称的下单客户: "
+                        "detail": f"registration number {reg_id} maps to several ordering customers with different names: "
                         + " | ".join(sorted(str(n) for n in grp["customer_name"])),
                     }
                 )
@@ -1001,7 +1001,7 @@ def registry_siren_issues(cust: pd.DataFrame, tp: pd.DataFrame) -> list[dict]:
                     "customer_name": r.customer_name,
                     "amount_ht_eur": r.amount_ht_eur,
                     "third_party_ids": r.third_party_id,
-                    "detail": f"档案中注册号 {r.company_reg_id} 还对应: " + " | ".join(sorted(others)[:5]),
+                    "detail": f"in third-party records, registration number {r.company_reg_id} also maps to: " + " | ".join(sorted(others)[:5]),
                 }
             )
     return out

@@ -194,17 +194,17 @@ def name_notes(name: object) -> list[str]:
     """Short notes about how the raw name looks (site/branch qualifiers, etc.)."""
     name = _text(name)
     if not name:
-        return ["无客户名称"]
+        return ["no customer name"]
     notes: list[str] = []
     upper = basic_key(name) or ""
     if _PAREN.search(name):
-        notes.append("名称含括号限定")
+        notes.append("name has a parenthesised qualifier")
     if re.search(r"\s[-–/]\s", name):
-        notes.append("名称含分支/地点后缀")
+        notes.append("name has a branch/location suffix")
     if _LOCATION_WORDS.search(upper):
-        notes.append("名称含地点/门店词")
+        notes.append("name contains a location/store word")
     if re.search(r"\b\d{2,}\b", upper):
-        notes.append("名称含编号")
+        notes.append("name contains a number")
     return notes
 
 

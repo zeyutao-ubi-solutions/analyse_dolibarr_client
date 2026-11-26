@@ -1,72 +1,72 @@
-# 数据来源与已知问题
+# Data sources and known issues
 
-本仓库读四类数据：Snowflake 数据仓库的 Dolibarr marts（主数据）、Dolibarr REST API（只读补充）、Apify 抓取的 LinkedIn 公司主页、HubSpot（联系人模型，计划中）。凭证位置见根目录 README。
+This repository reads four kinds of data: the Dolibarr marts in the Snowflake data warehouse (master data), the Dolibarr REST API (read-only supplement), LinkedIn company pages scraped with Apify, and HubSpot (contact model, planned). Credential locations are in the root README.
 
-## 1. Snowflake：Dolibarr marts
+## 1. Snowflake: Dolibarr marts
 
-数据库 `UBI_DATAHUB_TEST`，schema `DBT__3_MARTS`。`pull.py` 按原始粒度整表拉取，存为 `data/raw/<snap>/*.parquet` 和 `manifest.json`，之后只读。
+Database `UBI_DATAHUB_TEST`, schema `DBT__3_MARTS`. `pull.py` pulls whole tables at their original grain and stores them as `data/raw/<snap>/*.parquet` plus `manifest.json`, read-only afterwards.
 
-| 表 | 粒度 | 主要用途 |
+| Table | Grain | Main use |
 |---|---|---|
-| `mart_orders_to_date` | 订单行 | 客户、金额、品类、产品；客户名单的基础 |
-| `mart_invoicing_to_date` | 发票行 | 订单 vs 发票核对 |
-| `mart_contracts_to_date` | 合同行 | 是否有合同 |
-| `mart_product_catalog` | 产品（SKU） | 产品名称（业务线判断） |
-| `mart_third_parties` | 第三方档案 | 名称、国家、城市、SIREN、客户 / 潜在客户 / 供应商 / 集团内部标记 |
-| `mart_supplier_orders_to_date` | 采购订单行 | 判断客户是否也是供应商 |
-| `mart_revenues_per_customer` | 客户 × 期间 | 目前未使用 |
-| `mart_element_links` | 单据关联 | 目前未使用 |
+| `mart_orders_to_date` | Order line | Customer, amount, category, product; basis of the customer list |
+| `mart_invoicing_to_date` | Invoice line | Order vs invoice reconciliation |
+| `mart_contracts_to_date` | Contract line | Whether there is a contract |
+| `mart_product_catalog` | Product (SKU) | Product name (business-line determination) |
+| `mart_third_parties` | Third-party record | Name, country, town, SIREN, customer / prospect / supplier / intercompany flags |
+| `mart_supplier_orders_to_date` | Purchase order line | Whether a customer is also a supplier |
+| `mart_revenues_per_customer` | Customer × period | Not used yet |
+| `mart_element_links` | Document links | Not used yet |
 
-### 已知问题
+### Known issues
 
-| 问题 | 影响 | 处理 |
+| Issue | Impact | Handling |
 |---|---|---|
-| 订单的 `CUSTOMER_ID` 是 32 位哈希。部分客户恰好等于 md5(THIRD_PARTY_ID)，其余是把多个第三方归并在一起的未知键 | 不能直接对到第三方档案 | **禁止** `CUSTOMER_ID = THIRD_PARTY_ID`。优先用 Dolibarr API 查订单实际开票的第三方（socid），查不到再按名称匹配 |
-| `ENTITY_ID` 对应法人：1 = Ubi Solutions、2 = Page Up、3 = Ubi Smart、5 = Ubi Impact | | `companies.ENTITY_ID_TO_NAME` |
-| Page Up / Ubi Smart / Ubi Impact 的订单从 2023–2024 年才进数据仓库 | 只在这几个法人下单的客户，首单日期和活跃年数可能偏短；2024 年起新客户数的跳升部分是数据原因 | 标记 `history_truncated`；价值档位里记为 `truncated` |
-| 集团内部公司（`IS_INTERCOMPANY`）也作为「客户」出现在订单里 | 金额虚高 | 全部订单都开给内部公司的客户排除；部分开给内部公司的，扣掉那部分订单 |
-| `ITEM_CATEGORY` 分不开 BLE 定位和 RFID：「Traceurs et objets connectés」里大部分是 RFID 纺织标签 | 不能按品类判断业务线 | 用 Dolibarr 产品标签 + 产品名称规则（`product_lines.py`） |
-| NAF 字段（`SECTION`…`CLASSE`）只有名称、没有代码，只覆盖约 292 个客户，几乎都在法国 | 不能当模型特征（会变成国家代理变量） | 只用于分析 |
-| 档案的 `SIREN` 列混有 SIREN、SIRET 和外国税号 | | 原样保留，用的时候自己校验位数 |
-| 档案名有时带内部编码（`FR01 FAURECIA …`），订单上的客户名有时是归并出来的标签（`S Transport` 实际是 BOVIS Transport） | 搜索用的名字不对 | `lookup_name` 优先用开票档案名；两者无关时 `lookup_name_conflict=true`，两个都搜 |
+| The order `CUSTOMER_ID` is a 32-character hash. For some customers it equals md5(THIRD_PARTY_ID); the rest are unknown keys merging several third parties | Cannot be mapped directly to third-party records | `CUSTOMER_ID = THIRD_PARTY_ID` is **forbidden**. Prefer the Dolibarr API to find the third party each order was actually invoiced to (socid); fall back to name matching when not found |
+| `ENTITY_ID` maps to legal entities: 1 = Ubi Solutions, 2 = Page Up, 3 = Ubi Smart, 5 = Ubi Impact | | `companies.ENTITY_ID_TO_NAME` |
+| Page Up / Ubi Smart / Ubi Impact orders only entered the data warehouse in 2023–2024 | For customers ordering only through these entities, first-order date and years active may be too short; part of the jump in new customers from 2024 is a data artefact | Flag `history_truncated`; recorded as `truncated` in the value tier |
+| Group intercompany entities (`IS_INTERCOMPANY`) also appear as "customers" in orders | Inflated amounts | Customers whose orders are all invoiced to intercompany entities are excluded; for partial cases, those orders are deducted |
+| `ITEM_CATEGORY` cannot separate BLE geolocation from RFID: most of "Traceurs et objets connectés" is RFID textile tags | Business line cannot be determined from the category | Use Dolibarr product tags + product name rules (`product_lines.py`) |
+| The NAF fields (`SECTION`…`CLASSE`) have names only, no codes, and cover only about 292 customers, almost all in France | Cannot be used as model features (would become a country proxy) | Analysis only |
+| The record `SIREN` column mixes SIREN, SIRET and foreign tax numbers | | Kept as is; validate the number of digits when using it |
+| Record names sometimes carry internal codes (`FR01 FAURECIA …`); the customer name on orders is sometimes a merged label (`S Transport` is actually BOVIS Transport) | Wrong name used for search | `lookup_name` prefers the invoiced record name; when the two are unrelated, `lookup_name_conflict=true` and both are searched |
 
-## 2. Dolibarr REST API（只读）
+## 2. Dolibarr REST API (read-only)
 
-只用 GET。请求头 `DOLAPIKEY`，按法人加 `DOLAPIENTITY`（1 / 2 / 3 / 5）。API 用户是管理员账号，所以代码里**没有任何写操作的方法**。
+GET only. Header `DOLAPIKEY`, plus `DOLAPIENTITY` per legal entity (1 / 2 / 3 / 5). The API user is an admin account, so the code has **no write methods at all**.
 
-| 模块 | 接口 | 取什么 | 输出 |
+| Module | Endpoint | What it fetches | Output |
 |---|---|---|---|
-| `erp_socid.py` | `GET /orders`（分页） | 订单 id、编号、socid、法人 | `erp_orders.csv`、`erp_order_socid.csv` |
-| `erp_thirdparties.py` | `GET /thirdparties`、`GET /contacts` | 名称、SIREN、网站、公司邮箱**域名**、联系人邮箱**域名**及次数、员工数档位 | `erp_thirdparties.csv` |
-| `product_lines.py` | `GET /categories?type=product`、`GET /categories/{id}/objects` | 产品标签及其产品 | `erp_product_tags.csv` |
+| `erp_socid.py` | `GET /orders` (paginated) | Order id, number, socid, legal entity | `erp_orders.csv`, `erp_order_socid.csv` |
+| `erp_thirdparties.py` | `GET /thirdparties`, `GET /contacts` | Name, SIREN, website, company email **domain**, contact email **domains** and counts, employee-count tier | `erp_thirdparties.csv` |
+| `product_lines.py` | `GET /categories?type=product`, `GET /categories/{id}/objects` | Product tags and their products | `erp_product_tags.csv` |
 
-### 已知问题
+### Known issues
 
-- **API 实例和数据仓库的来源从 ORDER_ID ≈ 9704（2026 年 9 月初）开始不一致**：较新的订单在 API 里缺失或编号不同。只有订单 id **和**编号都一致时才采用 API 返回的 socid（8,860 张里 8,408 张）；哪个实例是生产环境未经 IT 确认。
-- 联系人在各法人下返回的是同一批，按 id 去重。
-- 产品标签接口在法人 2（Page Up）和 5（Ubi Impact）返回 401；目前看到的标签都属于 Ubi Solutions。
-- GPSBLE 标签大约 2024 年起才有，老的定位产品没有标签。
-- 我们自己的员工常被挂成客户的联系人：`ubisolutions.net`、`pageup.fr` 等集团域名一律不当作客户域名。
+- **The API instance and the data warehouse source diverge from ORDER_ID ≈ 9704 (early September 2026)**: newer orders are missing from the API or have different numbers. The socid returned by the API is used only when the order id **and** the number both match (8,408 of 8,860); which instance is production has not been confirmed by IT.
+- Contacts returned under each legal entity are the same set; deduplicated by id.
+- The product tag endpoint returns 401 for entity 2 (Page Up) and 5 (Ubi Impact); all tags seen so far belong to Ubi Solutions.
+- The GPSBLE tag only exists from about 2024; older geolocation products have no tag.
+- Our own employees are often attached as contacts of customers: group domains such as `ubisolutions.net` and `pageup.fr` are never treated as customer domains.
 
-### 个人数据
+### Personal data
 
-联系人的姓名、完整邮箱、电话、个人 LinkedIn **只在内存里使用，不写入任何文件**；只保留邮箱的域名和出现次数。
+Contact names, full email addresses, phone numbers and personal LinkedIn profiles are **used only in memory and never written to any file**; only email domains and their counts are kept.
 
-## 3. LinkedIn（Apify）
+## 3. LinkedIn (Apify)
 
-- actor：`harvestapi/linkedin-company`，输入 `{"searches": [...]}`（按名称搜，返回第一条）或 `{"companies": [url, ...]}`。
-- 只抓公司主页，不抓个人资料。
-- 试点实测按返回条数计费，约 $0.0012 / 条；搜不到不收费。
-- 名称搜索的第一条经常是同名外国公司、集团页或工会页，匹配规则见 `docs/labeling/linkedin_scrape_contract.md` 第 3 节。
+- actor: `harvestapi/linkedin-company`, input `{"searches": [...]}` (search by name, returns the first result) or `{"companies": [url, ...]}`.
+- Company pages only, never personal profiles.
+- Measured in the pilot: billed per returned item, about $0.0012 / item; no charge when nothing is found.
+- The first result of a name search is often a foreign company with the same name, a group page or a trade-union page; matching rules are in section 3 of `docs/labeling/linkedin_scrape_contract.md`.
 
-## 4. HubSpot（计划中，联系人模型）
+## 4. HubSpot (planned, contact model)
 
-web app 已有只读集成（`~/web_app_refactoring/backEnd/src/services/hubspot/`）：读取 contacts / companies / deals 及其关联，按邮箱和 `lemlistlinkedinurl` 把人匹配到 HubSpot 联系人。用到的字段包括：
+The web app already has a read-only integration (`~/web_app_refactoring/backEnd/src/services/hubspot/`): it reads contacts / companies / deals and their associations, and matches people to HubSpot contacts by email and `lemlistlinkedinurl`. Fields used include:
 
-- 联系人：`email`、`jobtitle`、`lifecyclestage`、`hs_lead_status`、`notes_last_contacted`、`num_associated_deals`、`hubspot_owner_id`、`lemlistlinkedinurl`
-- 交易：`dealstage`、`closedate`
-- 公司：`name`、`domain`
+- Contacts: `email`, `jobtitle`, `lifecyclestage`, `hs_lead_status`, `notes_last_contacted`, `num_associated_deals`, `hubspot_owner_id`, `lemlistlinkedinurl`
+- Deals: `dealstage`, `closedate`
+- Companies: `name`, `domain`
 
-web app 还有一个只读的字段探查工具（`field_probe.py`），只记录字段名、枚举值和填充数量，不记录个人信息。联系人模型的第一步就是用它确认哪些字段有数据，见 `docs/models/contact_model.md`。
+The web app also has a read-only field probe tool (`field_probe.py`) that records only field names, enum values and fill counts, no personal information. The first step of the contact model is to use it to confirm which fields have data; see `docs/models/contact_model.md`.
 
-注意：web app 自己也会往 HubSpot 写公司和联系人，所以 HubSpot 里有一部分记录本身就是 web app 筛选出来的。
+Note: the web app itself also writes companies and contacts to HubSpot, so some HubSpot records were themselves selected by the web app.

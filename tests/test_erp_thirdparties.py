@@ -169,7 +169,7 @@ def test_shared_domain_note_and_missing_web_file():
     tp = _tp([("1", "FR", False)])
     two = pd.concat([_cust(), _cust(customer_id="c2")], ignore_index=True)
     out = attach_web_hints(two, web, tp)
-    assert out["notes"].str.contains("域名与其他客户共用").all()
+    assert out["notes"].str.contains("domain shared with other customers").all()
     empty = attach_web_hints(_cust(), None, tp).iloc[0]
     assert empty["web_domain"] is None and empty["notes"] == ""
 
